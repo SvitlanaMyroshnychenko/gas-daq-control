@@ -1,0 +1,7 @@
+PySide6
+pyqtgraph
+pandas
+numpy
+openpyxl
+bronkhorst-propar
+pyvisa
