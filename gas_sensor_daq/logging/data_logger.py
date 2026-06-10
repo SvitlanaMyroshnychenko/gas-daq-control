@@ -15,7 +15,7 @@ class CSVLogger:
 
     def write(self, record):
         row = record.to_dict()
-        self.writer.writerow(row)
+        self.writer.writerow({field: row.get(field, "") for field in FIELDNAMES})
         self.file.flush()
 
     def close(self):

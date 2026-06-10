@@ -55,7 +55,16 @@ class FakeMultimeter:
             nh3_actual_sccm=control_state.nh3_actual_sccm,
             air_setpoint_sccm=control_state.air_setpoint_sccm,
             air_actual_sccm=control_state.air_actual_sccm,
-            device_status=control_state.device_status,
+            multimeter_status="SIMULATED OK",
+            mfc_status=control_state.device_status,
+            mfc_port=control_state.mfc_port,
+            mfc_address=control_state.mfc_address,
+            mfc_serial=control_state.mfc_serial,
+            mfc_fluid=control_state.mfc_fluid,
+            mfc_capacity_sccm=control_state.mfc_capacity_sccm,
+            mfc_capacity_unit=control_state.mfc_capacity_unit,
+            mfc_temperature_c=control_state.mfc_temperature_c,
+            mfc_alarm_info=control_state.mfc_alarm_info,
         )
 
     def close(self):

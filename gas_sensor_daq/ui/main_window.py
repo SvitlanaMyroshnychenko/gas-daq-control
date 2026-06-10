@@ -27,6 +27,11 @@ import pyqtgraph as pg
 from gas_sensor_daq.core.acquisition_manager import AcquisitionManager
 from gas_sensor_daq.devices.visa_discovery import discover_visa_instruments
 
+try:
+    from serial.tools import list_ports
+except ImportError:
+    list_ports = None
+
 
 class Stepper(QWidget):
     def __init__(self, minimum=0, maximum=100, value=0, suffix="", step=1, parent=None):
@@ -114,9 +119,18 @@ class MainWindow(QMainWindow):
         self.multimeter_status_label.setWordWrap(True)
         self.mfc_status_label = QLabel("Connected: simulated")
         self.mfc_status_label.setObjectName("connectedLabel")
-        self.mfc_note_label = QLabel("Gas controls are simulated until MFC hardware is connected.")
+        self.mfc_status_label.setWordWrap(True)
+        self.mfc_note_label = QLabel("Real Bronkhorst mode is read-only until gas testing is approved.")
         self.mfc_note_label.setObjectName("mutedLabel")
         self.mfc_note_label.setWordWrap(True)
+        self.mfc_mode_selector = QComboBox()
+        self.mfc_mode_selector.addItems(["Simulated", "Real Bronkhorst"])
+        self.mfc_port_selector = QComboBox()
+        self.mfc_port_selector.addItem(self.manager.bronkhorst_port, self.manager.bronkhorst_port)
+        self.scan_mfc_button = QPushButton("Scan")
+        self.connect_mfc_button = QPushButton("Connect")
+        self.scan_mfc_button.setFixedWidth(52)
+        self.connect_mfc_button.setFixedWidth(68)
 
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
@@ -125,7 +139,9 @@ class MainWindow(QMainWindow):
         self.start_button.setObjectName("startButton")
         self.stop_button.setObjectName("stopButton")
         self.start_button.clicked.connect(self.start_experiment)
-        self.stop_button.clicked.connect(self.manager.stop_experiment)
+        self.stop_button.clicked.connect(
+            lambda _checked=False: self.manager.stop_experiment()
+        )
 
         self.nh3_value_label = self.metric_value("--")
         self.air_value_label = self.metric_value("--")
@@ -158,14 +174,25 @@ class MainWindow(QMainWindow):
         self.apply_nh3_button.clicked.connect(self.apply_nh3)
         self.apply_air_button.clicked.connect(self.apply_air)
         self.air_purge_button.clicked.connect(self.manager.air_purge)
-        self.humidity_on_button.clicked.connect(lambda: self.set_humidity(True))
-        self.humidity_off_button.clicked.connect(lambda: self.set_humidity(False))
-        self.heating_on_button.clicked.connect(lambda: self.set_heating(True))
-        self.heating_off_button.clicked.connect(lambda: self.set_heating(False))
+        self.humidity_on_button.clicked.connect(
+            lambda _checked=False: self.set_humidity(True)
+        )
+        self.humidity_off_button.clicked.connect(
+            lambda _checked=False: self.set_humidity(False)
+        )
+        self.heating_on_button.clicked.connect(
+            lambda _checked=False: self.set_heating(True)
+        )
+        self.heating_off_button.clicked.connect(
+            lambda _checked=False: self.set_heating(False)
+        )
         self.scan_visa_button.clicked.connect(self.scan_visa_devices)
         self.connect_multimeter_button.clicked.connect(self.connect_multimeter)
         self.multimeter_mode_selector.currentTextChanged.connect(self.on_multimeter_mode_changed)
         self.visa_device_selector.currentIndexChanged.connect(self.on_visa_device_selected)
+        self.scan_mfc_button.clicked.connect(self.scan_mfc_ports)
+        self.connect_mfc_button.clicked.connect(self.connect_mfc)
+        self.mfc_mode_selector.currentTextChanged.connect(self.on_mfc_mode_changed)
 
         self.resistance_plot = self.create_plot(
             "Resistance vs Time",
@@ -219,6 +246,7 @@ class MainWindow(QMainWindow):
 
         self.apply_styles()
         self.on_multimeter_mode_changed(self.multimeter_mode_selector.currentText())
+        self.on_mfc_mode_changed(self.mfc_mode_selector.currentText())
 
     def connect_manager_signals(self):
         self.manager.experiment_started.connect(self.on_experiment_started)
@@ -228,6 +256,7 @@ class MainWindow(QMainWindow):
         self.manager.state_changed.connect(self.refresh_state_label)
         self.manager.device_error.connect(self.on_device_error)
         self.manager.multimeter_changed.connect(self.on_multimeter_changed)
+        self.manager.mfc_changed.connect(self.on_mfc_changed)
 
     def create_toolbar(self):
         toolbar = QFrame()
@@ -324,15 +353,11 @@ class MainWindow(QMainWindow):
         state_group.setLayout(state_layout)
 
         devices_group = self.group("Devices", "greenGroup")
+        devices_group.setMinimumHeight(330)
         devices_layout = QVBoxLayout()
         devices_layout.setSpacing(6)
         devices_layout.addWidget(self.create_multimeter_control())
-        devices_layout.addWidget(
-            self.device_row(
-                "Bronkhorst F-201CV",
-                "Simulated only - gas controls do not affect real resistor",
-            )
-        )
+        devices_layout.addWidget(self.create_mfc_control())
         devices_group.setLayout(devices_layout)
 
         readings_group = self.group("Live Readings", "purpleGroup")
@@ -507,6 +532,36 @@ class MainWindow(QMainWindow):
         row.setLayout(layout)
         return row
 
+    def create_mfc_control(self):
+        row = QFrame()
+        row.setObjectName("deviceRow")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(6)
+
+        title = QLabel("Bronkhorst F-201CV")
+
+        mode_layout = QHBoxLayout()
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(5)
+        mode_layout.addWidget(self.mfc_mode_selector, 1)
+        mode_layout.addWidget(self.scan_mfc_button, 0)
+        mode_layout.addWidget(self.connect_mfc_button, 0)
+
+        port_layout = QHBoxLayout()
+        port_layout.setContentsMargins(0, 0, 0, 0)
+        port_layout.setSpacing(5)
+        port_layout.addWidget(self.mfc_port_selector, 1)
+
+        layout.addWidget(title)
+        layout.addLayout(mode_layout)
+        layout.addLayout(port_layout)
+        layout.addWidget(self.mfc_status_label)
+        layout.addWidget(self.mfc_note_label)
+
+        row.setLayout(layout)
+        return row
+
     def create_plot(self, title, left_label, units, color):
         plot = pg.PlotWidget(title=title)
         plot.setBackground("w")
@@ -558,6 +613,11 @@ class MainWindow(QMainWindow):
         if self.multimeter_mode_selector.currentText() == "Real Keithley":
             if self.manager.multimeter_mode != "real":
                 self.on_device_error("Select Connect before starting with Real Keithley.")
+                return False
+
+        if self.mfc_mode_selector.currentText() == "Real Bronkhorst":
+            if self.manager.mfc_mode != "real":
+                self.on_device_error("Select Connect before starting with Real Bronkhorst.")
                 return False
 
         return True
@@ -667,6 +727,130 @@ class MainWindow(QMainWindow):
         else:
             self.multimeter_status_label.setText("Connected: simulated")
             self.multimeter_status_label.setToolTip(status)
+
+    def on_mfc_mode_changed(self, text):
+        is_real = text == "Real Bronkhorst"
+        self.mfc_port_selector.setEnabled(is_real)
+        self.scan_mfc_button.setEnabled(is_real)
+        self.connect_mfc_button.setText("Connect" if is_real else "Use")
+        self.set_mfc_write_controls_enabled(not is_real)
+
+        if is_real:
+            self.mfc_note_label.setText(
+                "Flow writes disabled."
+            )
+        else:
+            self.mfc_note_label.setText(
+                "Simulated MFC: gas controls affect only the software model."
+            )
+
+    def scan_mfc_ports(self):
+        self.mfc_port_selector.clear()
+
+        if list_ports is None:
+            self.mfc_port_selector.addItem("pyserial unavailable", "")
+            self.on_device_error("COM port scan failed: pyserial is not available.")
+            return
+
+        ports = list(list_ports.comports())
+        if not ports:
+            self.mfc_port_selector.addItem("No COM ports found", "")
+            self.file_label.setText("No COM ports found")
+            return
+
+        for port in ports:
+            label = f"{port.device} - {port.description}"
+            self.mfc_port_selector.addItem(label[:48], port.device)
+            index = self.mfc_port_selector.count() - 1
+            self.mfc_port_selector.setItemData(index, label, Qt.ToolTipRole)
+
+        self.file_label.setText(f"Found {len(ports)} COM port(s)")
+
+    def connect_mfc(self):
+        if self.mfc_mode_selector.currentText() == "Real Bronkhorst":
+            port = self.mfc_port_selector.currentData() or self.mfc_port_selector.currentText()
+            port = port.strip()
+            if not port:
+                self.on_device_error("Select Bronkhorst COM port before connecting.")
+                return
+
+            ok = self.manager.set_mfc_mode("real", port=port)
+        else:
+            ok = self.manager.set_mfc_mode("simulation")
+
+        if ok:
+            self.status_label.setText("IDLE")
+            self.status_label.setProperty("running", False)
+            self.status_label.style().unpolish(self.status_label)
+            self.status_label.style().polish(self.status_label)
+            self.file_label.setText("MFC ready")
+
+    def on_mfc_changed(self, mode, status):
+        if mode == "real":
+            self.mfc_status_label.setText(self.compact_mfc_status(status))
+            self.mfc_status_label.setToolTip(status)
+            self.set_mfc_write_controls_enabled(False)
+        else:
+            self.mfc_status_label.setText("Connected: simulated")
+            self.mfc_status_label.setToolTip(status)
+            self.set_mfc_write_controls_enabled(True)
+
+    @staticmethod
+    def compact_mfc_status(status):
+        parts = [part.strip() for part in status.split("|")]
+        port = ""
+        address = ""
+        serial = ""
+        fluid = ""
+        capacity = ""
+
+        for part in parts:
+            if part.upper().startswith("COM"):
+                port = part
+            elif part.startswith("addr "):
+                address = part.replace("addr ", "addr ")
+            elif part.startswith("S/N "):
+                serial = part.replace("S/N ", "")
+            elif part.startswith("fluid "):
+                fluid = part.replace("fluid ", "")
+            elif part.startswith("capacity "):
+                capacity = part.replace("capacity ", "")
+
+        first_line = "Real read-only"
+        if port or address:
+            first_line = f"{first_line}: {port} {address}".strip()
+
+        second_line_parts = []
+        if serial:
+            second_line_parts.append(f"S/N {serial}")
+        if fluid:
+            second_line_parts.append(fluid)
+        if capacity:
+            second_line_parts.append(capacity)
+
+        if second_line_parts:
+            return f"{first_line}\n{' | '.join(second_line_parts)}"
+
+        return first_line
+
+    def set_mfc_write_controls_enabled(self, enabled):
+        widgets = [
+            self.nh3_control,
+            self.air_control,
+            self.nh3_duration,
+            self.air_duration,
+            self.apply_nh3_button,
+            self.apply_air_button,
+            self.air_purge_button,
+            self.humidity_duration,
+            self.heating_duration,
+            self.humidity_on_button,
+            self.humidity_off_button,
+            self.heating_on_button,
+            self.heating_off_button,
+        ]
+        for widget in widgets:
+            widget.setEnabled(enabled)
 
     def apply_nh3(self):
         self.manager.apply_nh3(

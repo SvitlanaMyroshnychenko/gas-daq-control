@@ -4,7 +4,7 @@ import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from gas_sensor_daq.devices.factory import create_devices, create_multimeter
+from gas_sensor_daq.devices.factory import create_devices, create_mfc, create_multimeter
 from gas_sensor_daq.logging.data_logger import CSVLogger, ExcelLogger
 from gas_sensor_daq.models.records import MeasurementRecord
 from gas_sensor_daq.settings import DEFAULT_SETTINGS
@@ -18,13 +18,17 @@ class AcquisitionManager(QObject):
     state_changed = Signal(object)
     device_error = Signal(str)
     multimeter_changed = Signal(str, str)
+    mfc_changed = Signal(str, str)
 
     def __init__(self, parent=None, settings=DEFAULT_SETTINGS):
         super().__init__(parent)
         self.settings = settings
         self.multimeter, self.mfc = create_devices(settings)
         self.multimeter_mode = settings.multimeter_mode
+        self.mfc_mode = settings.mfc_mode
         self.keithley_resource = settings.keithley_resource
+        self.bronkhorst_port = settings.bronkhorst_port
+        self.bronkhorst_address = settings.bronkhorst_address
         self.logger = None
         self.pending_event = ""
         self.experiment_start_time = None
@@ -74,6 +78,48 @@ class AcquisitionManager(QObject):
             return f"Keithley 2450: real ({self.keithley_resource})"
 
         return "Keithley 2450: simulated"
+
+    def set_mfc_mode(self, mode, port="", address=None):
+        if self.acquisition_timer.isActive():
+            self.handle_device_error(
+                "Cannot switch MFC",
+                RuntimeError("Stop the experiment before changing device mode."),
+            )
+            return False
+
+        previous_mfc = self.mfc
+        self._close_device(previous_mfc, "Previous MFC close failed")
+
+        try:
+            new_mfc = create_mfc(
+                self.settings,
+                mode=mode,
+                port=port or self.settings.bronkhorst_port,
+                address=address,
+            )
+        except Exception as exc:
+            self.mfc = create_mfc(self.settings, mode="simulation")
+            self.mfc_mode = "simulation"
+            self.mfc_changed.emit("simulation", self.mfc_status_text())
+            self.handle_device_error("MFC connection failed", exc)
+            return False
+
+        self.mfc = new_mfc
+        self.mfc_mode = mode
+        self.bronkhorst_port = port
+        self.bronkhorst_address = address
+        self.mfc_changed.emit(mode, self.mfc_status_text())
+        self.emit_state_changed()
+        return True
+
+    def mfc_status_text(self):
+        if self.mfc_mode == "real":
+            status_text = getattr(self.mfc, "status_text", None)
+            if status_text is not None:
+                return status_text()
+            return f"Bronkhorst MFC: real ({self.bronkhorst_port})"
+
+        return "Bronkhorst MFC: simulated"
 
     def start_experiment(self, save_format):
         try:
@@ -195,24 +241,41 @@ class AcquisitionManager(QObject):
 
     def acquire_once(self):
         try:
-            record = self.multimeter.read(self.current_state())
-            record.event = self.pending_event
-
-            if self.logger is not None:
-                try:
-                    self.logger.write(record)
-                except Exception as exc:
-                    self.handle_device_error("Logger write failed", exc)
-                    self.stop_experiment("Stopped: logger write failed")
-                    return
-
-            event = self.pending_event
-            self.pending_event = ""
-            self.data_acquired.emit(record.to_dict(), event)
+            state = self.mfc.get_state()
         except Exception as exc:
-            self.handle_device_error("Acquisition failed", exc)
-            self.write_error_record(self.pending_event)
-            self.stop_experiment("Stopped: acquisition failed")
+            message = self.format_device_error(
+                "Bronkhorst MFC connection lost during read",
+                exc,
+            )
+            self.handle_device_error_message(message)
+            self.write_error_record(message)
+            self.stop_experiment("Stopped: MFC connection lost")
+            return
+
+        try:
+            record = self.multimeter.read(state)
+            record.event = self.pending_event
+        except Exception as exc:
+            message = self.format_device_error(
+                "Keithley connection lost during measurement",
+                exc,
+            )
+            self.handle_device_error_message(message)
+            self.write_error_record(message, state)
+            self.stop_experiment("Stopped: Keithley connection lost")
+            return
+
+        if self.logger is not None:
+            try:
+                self.logger.write(record)
+            except Exception as exc:
+                self.handle_device_error("Logger write failed", exc)
+                self.stop_experiment("Stopped: logger write failed")
+                return
+
+        event = self.pending_event
+        self.pending_event = ""
+        self.data_acquired.emit(record.to_dict(), event)
 
     def emit_state_changed(self):
         try:
@@ -229,18 +292,29 @@ class AcquisitionManager(QObject):
             return False
 
     def handle_device_error(self, context, exc):
-        message = f"{context}: {exc}"
+        message = self.format_device_error(context, exc)
+        self.handle_device_error_message(message)
+
+    def handle_device_error_message(self, message):
         self.pending_event = message
         self.device_error.emit(message)
 
-    def write_error_record(self, message):
+    @staticmethod
+    def format_device_error(context, exc):
+        detail = str(exc).strip()
+        if detail:
+            return f"{context}. Details: {detail}"
+        return context
+
+    def write_error_record(self, message, state=None):
         if self.logger is None:
             return
 
-        try:
-            state = self.current_state()
-        except Exception:
-            state = None
+        if state is None:
+            try:
+                state = self.current_state()
+            except Exception:
+                state = None
 
         elapsed = 0.0
         if self.experiment_start_time is not None:
@@ -260,7 +334,16 @@ class AcquisitionManager(QObject):
             nh3_actual_sccm=state.nh3_actual_sccm if state is not None else math.nan,
             air_setpoint_sccm=state.air_setpoint_sccm if state is not None else math.nan,
             air_actual_sccm=state.air_actual_sccm if state is not None else math.nan,
-            device_status="ERROR",
+            multimeter_status="ERROR",
+            mfc_status=state.device_status if state is not None else "",
+            mfc_port=state.mfc_port if state is not None else "",
+            mfc_address=state.mfc_address if state is not None else "",
+            mfc_serial=state.mfc_serial if state is not None else "",
+            mfc_fluid=state.mfc_fluid if state is not None else "",
+            mfc_capacity_sccm=state.mfc_capacity_sccm if state is not None else math.nan,
+            mfc_capacity_unit=state.mfc_capacity_unit if state is not None else "",
+            mfc_temperature_c=state.mfc_temperature_c if state is not None else math.nan,
+            mfc_alarm_info=state.mfc_alarm_info if state is not None else "",
         )
 
         try:

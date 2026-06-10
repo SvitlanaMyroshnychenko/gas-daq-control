@@ -24,13 +24,21 @@ def create_multimeter(settings: DeviceSettings, mode=None, resource_name=None):
     raise ValueError(f"Unsupported multimeter mode: {settings.multimeter_mode}")
 
 
-def create_mfc(settings: DeviceSettings):
-    mode = settings.mfc_mode.lower().strip()
+def create_mfc(settings: DeviceSettings, mode=None, port=None, address=None):
+    mode = (mode or settings.mfc_mode).lower().strip()
 
     if mode == "simulation":
         return FakeMFC(default_air_flow_sccm=settings.default_air_flow_sccm)
 
     if mode == "real":
-        return RealBronkhorstMFC(settings.bronkhorst_port)
+        selected_address = (
+            settings.bronkhorst_address if address is None else address
+        )
+        return RealBronkhorstMFC(
+            port or settings.bronkhorst_port,
+            baudrate=settings.bronkhorst_baudrate,
+            address=selected_address,
+            default_air_flow_sccm=settings.default_air_flow_sccm,
+        )
 
     raise ValueError(f"Unsupported MFC mode: {settings.mfc_mode}")
