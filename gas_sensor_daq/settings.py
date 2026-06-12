@@ -8,9 +8,12 @@ class DeviceSettings:
     multimeter_mode: str = "simulation"
     mfc_mode: str = "simulation"
     acquisition_interval_ms: int = 2000
-    bronkhorst_port: str = "COM3"
-    keithley_resource: str = ""
+    mfc_port: str = "COM3"
+    mfc_baudrate: int = 38400
+    mfc_address: int | None = None
+    multimeter_resource: str = ""
     default_air_flow_sccm: float = 100.0
+    data_directory: str = "data"
 
 
 def load_device_settings():
@@ -25,9 +28,23 @@ def load_device_settings():
             os.getenv("GAS_DAQ_DEVICE_MODE", "simulation"),
         ),
         acquisition_interval_ms=_env_int("GAS_DAQ_INTERVAL_MS", 2000),
-        bronkhorst_port=os.getenv("GAS_DAQ_BRONKHORST_PORT", "COM3"),
-        keithley_resource=os.getenv("GAS_DAQ_KEITHLEY_RESOURCE", ""),
+        mfc_port=os.getenv(
+            "GAS_DAQ_MFC_PORT",
+            os.getenv("GAS_DAQ_BRONKHORST_PORT", "COM3"),
+        ),
+        mfc_baudrate=_env_int(
+            "GAS_DAQ_MFC_BAUDRATE",
+            _env_int("GAS_DAQ_BRONKHORST_BAUDRATE", 38400),
+        ),
+        mfc_address=_env_optional_int("GAS_DAQ_MFC_ADDRESS")
+        if os.getenv("GAS_DAQ_MFC_ADDRESS") is not None
+        else _env_optional_int("GAS_DAQ_BRONKHORST_ADDRESS"),
+        multimeter_resource=os.getenv(
+            "GAS_DAQ_MULTIMETER_RESOURCE",
+            os.getenv("GAS_DAQ_KEITHLEY_RESOURCE", ""),
+        ),
         default_air_flow_sccm=_env_float("GAS_DAQ_DEFAULT_AIR_FLOW", 100.0),
+        data_directory=os.getenv("GAS_DAQ_DATA_DIR", "data"),
     )
 
 
@@ -51,6 +68,17 @@ def _env_float(name, default):
         return float(value)
     except ValueError:
         return default
+
+
+def _env_optional_int(name):
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 DEFAULT_SETTINGS = load_device_settings()

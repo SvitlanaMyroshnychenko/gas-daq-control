@@ -1,5 +1,6 @@
 from datetime import datetime
 import math
+import os
 import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -11,6 +12,13 @@ from gas_sensor_daq.settings import DEFAULT_SETTINGS
 
 
 class AcquisitionManager(QObject):
+    """Coordinates UI actions, device adapters, acquisition timing, and logging.
+
+    The UI should stay mostly declarative: it asks this manager to start, stop,
+    apply controls, or switch devices. Hardware-specific details belong in the
+    device adapters under gas_sensor_daq/devices.
+    """
+
     experiment_started = Signal(str)
     experiment_stopped = Signal(str)
     elapsed_changed = Signal(str)
@@ -26,9 +34,10 @@ class AcquisitionManager(QObject):
         self.multimeter, self.mfc = create_devices(settings)
         self.multimeter_mode = settings.multimeter_mode
         self.mfc_mode = settings.mfc_mode
-        self.keithley_resource = settings.keithley_resource
-        self.bronkhorst_port = settings.bronkhorst_port
-        self.bronkhorst_address = settings.bronkhorst_address
+        self.multimeter_resource = settings.multimeter_resource
+        self.mfc_port = settings.mfc_port
+        self.mfc_address = settings.mfc_address
+        self.data_directory = settings.data_directory
         self.logger = None
         self.pending_event = ""
         self.experiment_start_time = None
@@ -47,6 +56,8 @@ class AcquisitionManager(QObject):
             raise
 
     def set_multimeter_mode(self, mode, resource_name=""):
+        # Device mode changes are blocked during acquisition so a run cannot
+        # silently mix data from two different instruments in one output file.
         if self.acquisition_timer.isActive():
             self.handle_device_error(
                 "Cannot switch multimeter",
@@ -68,18 +79,20 @@ class AcquisitionManager(QObject):
 
         self.multimeter = new_multimeter
         self.multimeter_mode = mode
-        self.keithley_resource = resource_name
+        self.multimeter_resource = resource_name
         self._close_device(previous_multimeter, "Previous multimeter close failed")
         self.multimeter_changed.emit(mode, self.multimeter_status_text())
         return True
 
     def multimeter_status_text(self):
         if self.multimeter_mode == "real":
-            return f"Keithley 2450: real ({self.keithley_resource})"
+            return f"Multimeter: real ({self.multimeter_resource})"
 
-        return "Keithley 2450: simulated"
+        return "Multimeter: simulated"
 
     def set_mfc_mode(self, mode, port="", address=None):
+        # If a real MFC connection fails, fall back to simulation. This keeps
+        # the UI usable without leaving a half-connected hardware object alive.
         if self.acquisition_timer.isActive():
             self.handle_device_error(
                 "Cannot switch MFC",
@@ -94,7 +107,7 @@ class AcquisitionManager(QObject):
             new_mfc = create_mfc(
                 self.settings,
                 mode=mode,
-                port=port or self.settings.bronkhorst_port,
+                port=port or self.settings.mfc_port,
                 address=address,
             )
         except Exception as exc:
@@ -106,8 +119,8 @@ class AcquisitionManager(QObject):
 
         self.mfc = new_mfc
         self.mfc_mode = mode
-        self.bronkhorst_port = port
-        self.bronkhorst_address = address
+        self.mfc_port = port
+        self.mfc_address = address
         self.mfc_changed.emit(mode, self.mfc_status_text())
         self.emit_state_changed()
         return True
@@ -117,22 +130,27 @@ class AcquisitionManager(QObject):
             status_text = getattr(self.mfc, "status_text", None)
             if status_text is not None:
                 return status_text()
-            return f"Bronkhorst MFC: real ({self.bronkhorst_port})"
+            return f"MFC controller: real ({self.mfc_port})"
 
-        return "Bronkhorst MFC: simulated"
+        return "MFC controller: simulated"
 
-    def start_experiment(self, save_format):
+    def start_experiment(self, save_format, data_directory=None):
         try:
+            # Every Start creates a fresh experiment file. Resume/append would
+            # need explicit metadata handling and is intentionally not implicit.
             self.multimeter.reset_time()
             self.pending_event = ""
             self.experiment_start_time = datetime.now()
+            self.data_directory = data_directory or self.data_directory
+            os.makedirs(self.data_directory, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            base_filename = f"experiment_{timestamp}"
             if save_format == "CSV":
-                filename = f"data/experiment_{timestamp}.csv"
+                filename = os.path.join(self.data_directory, f"{base_filename}.csv")
                 self.logger = CSVLogger(filename)
             else:
-                filename = f"data/experiment_{timestamp}.xlsx"
+                filename = os.path.join(self.data_directory, f"{base_filename}.xlsx")
                 self.logger = ExcelLogger(filename)
 
             self.acquisition_timer.start(self.settings.acquisition_interval_ms)
@@ -147,6 +165,8 @@ class AcquisitionManager(QObject):
         self.acquisition_timer.stop()
         self.elapsed_timer.stop()
 
+        self.safe_shutdown_controls()
+
         if self.logger is not None:
             try:
                 self.logger.close()
@@ -155,6 +175,19 @@ class AcquisitionManager(QObject):
             self.logger = None
 
         self.experiment_stopped.emit(message)
+
+    def safe_shutdown_controls(self):
+        # Safe shutdown is part of Stop, not only application exit. For real
+        # MFCs this currently performs no writes until gas control is approved.
+        shutdown = getattr(self.mfc, "safe_shutdown", None)
+        if shutdown is None:
+            return
+
+        try:
+            shutdown()
+            self.emit_state_changed()
+        except Exception as exc:
+            self.handle_device_error("Safe shutdown failed", exc)
 
     def close(self):
         self.acquisition_timer.stop()
@@ -240,11 +273,13 @@ class AcquisitionManager(QObject):
             QTimer.singleShot(duration_ms, lambda: self.set_heating(False))
 
     def acquire_once(self):
+        # Acquisition order matters: read the control state first, then attach
+        # the same state snapshot to the multimeter record and logger row.
         try:
             state = self.mfc.get_state()
         except Exception as exc:
             message = self.format_device_error(
-                "Bronkhorst MFC connection lost during read",
+                "MFC controller connection lost during read",
                 exc,
             )
             self.handle_device_error_message(message)
@@ -257,12 +292,12 @@ class AcquisitionManager(QObject):
             record.event = self.pending_event
         except Exception as exc:
             message = self.format_device_error(
-                "Keithley connection lost during measurement",
+                "Multimeter connection lost during measurement",
                 exc,
             )
             self.handle_device_error_message(message)
             self.write_error_record(message, state)
-            self.stop_experiment("Stopped: Keithley connection lost")
+            self.stop_experiment("Stopped: multimeter connection lost")
             return
 
         if self.logger is not None:
@@ -274,6 +309,8 @@ class AcquisitionManager(QObject):
                 return
 
         event = self.pending_event
+        # Events are one-shot annotations. The next row should be blank unless
+        # another user action or device error occurs.
         self.pending_event = ""
         self.data_acquired.emit(record.to_dict(), event)
 
@@ -307,6 +344,8 @@ class AcquisitionManager(QObject):
         return context
 
     def write_error_record(self, message, state=None):
+        # Write one final row when a device fails mid-run. NaN readings make the
+        # failure visible in analysis without pretending a measurement happened.
         if self.logger is None:
             return
 

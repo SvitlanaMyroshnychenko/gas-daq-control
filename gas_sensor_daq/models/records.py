@@ -2,6 +2,8 @@ from dataclasses import asdict, dataclass
 
 
 FIELDNAMES = [
+    # This list is the logging contract. Add new columns here first, then make
+    # sure MeasurementRecord fills them for both simulated and real devices.
     "timestamp",
     "elapsed_s",
     "resistance_ohm",
@@ -15,12 +17,23 @@ FIELDNAMES = [
     "nh3_actual_sccm",
     "air_setpoint_sccm",
     "air_actual_sccm",
-    "device_status",
+    "multimeter_status",
+    "mfc_status",
+    "mfc_port",
+    "mfc_address",
+    "mfc_serial",
+    "mfc_fluid",
+    "mfc_capacity_sccm",
+    "mfc_capacity_unit",
+    "mfc_temperature_c",
+    "mfc_alarm_info",
 ]
 
 
 @dataclass
 class ControlState:
+    """Current gas/environment state used by both fake and real MFC adapters."""
+
     nh3_setpoint_sccm: float = 0.0
     nh3_actual_sccm: float = 0.0
     air_setpoint_sccm: float = 100.0
@@ -28,6 +41,14 @@ class ControlState:
     humidity_on: bool = False
     heating_on: bool = False
     device_status: str = "Simulated"
+    mfc_port: str = ""
+    mfc_address: str = ""
+    mfc_serial: str = ""
+    mfc_fluid: str = ""
+    mfc_capacity_sccm: float = 0.0
+    mfc_capacity_unit: str = ""
+    mfc_temperature_c: float = 0.0
+    mfc_alarm_info: str = ""
 
     @property
     def nh3_flow_sccm(self):
@@ -54,6 +75,8 @@ class ControlState:
 
 @dataclass
 class MeasurementRecord:
+    """One row of experiment data written to CSV/Excel and shown in preview."""
+
     timestamp: str
     elapsed_s: float
     resistance_ohm: float
@@ -67,8 +90,16 @@ class MeasurementRecord:
     nh3_actual_sccm: float = 0.0
     air_setpoint_sccm: float = 100.0
     air_actual_sccm: float = 100.0
-    device_status: str = "Simulated"
+    multimeter_status: str = "Simulated"
+    mfc_status: str = "Simulated"
+    mfc_port: str = ""
+    mfc_address: str = ""
+    mfc_serial: str = ""
+    mfc_fluid: str = ""
+    mfc_capacity_sccm: float = 0.0
+    mfc_capacity_unit: str = ""
+    mfc_temperature_c: float = 0.0
+    mfc_alarm_info: str = ""
 
     def to_dict(self):
         return asdict(self)
-

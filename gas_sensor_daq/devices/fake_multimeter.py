@@ -17,6 +17,8 @@ class FakeMultimeter:
         elapsed = time.time() - self.start_time
         sensor_state = control_state.to_sensor_state()
 
+        # The fake response is intentionally simple but directional: NH3 and
+        # humidity lower resistance, heating raises temperature and resistance.
         baseline = 10000
 
         gas_effect = 0

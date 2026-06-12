@@ -9,11 +9,17 @@ from gas_sensor_daq.models.records import MeasurementRecord
 OPEN_CIRCUIT_THRESHOLD_OHM = 1e20
 
 
-class RealKeithley2450:
+class ScpiResistanceMultimeter:
+    """Generic SCPI resistance reader for a VISA-connected source meter.
+
+    Tested with Keithley 2450, but the class avoids model-specific names so a
+    similar SCPI instrument can be added later without changing the core logic.
+    """
+
     def __init__(self, resource_name):
         if not resource_name:
             raise ConnectionError(
-                "Keithley VISA resource is empty. Set GAS_DAQ_KEITHLEY_RESOURCE."
+                "VISA resource is empty. Select a multimeter resource before connecting."
             )
 
         self.resource_name = resource_name
@@ -29,10 +35,7 @@ class RealKeithley2450:
         self.instrument.write_termination = "\n"
         self.instrument.read_termination = "\n"
 
-        idn = self.instrument.query("*IDN?").strip()
-        if "2450" not in idn:
-            self.close()
-            raise ConnectionError(f"Unexpected instrument response: {idn}")
+        self.idn = self.instrument.query("*IDN?").strip()
 
         self._configure_resistance()
 
@@ -41,7 +44,7 @@ class RealKeithley2450:
 
     def read(self, control_state):
         if self.instrument is None:
-            raise ConnectionError("Keithley 2450 is not connected.")
+            raise ConnectionError("VISA resistance multimeter is not connected.")
 
         elapsed = time.time() - self.start_time
         raw_value = self._read_resistance_raw()
@@ -62,7 +65,16 @@ class RealKeithley2450:
             nh3_actual_sccm=control_state.nh3_actual_sccm,
             air_setpoint_sccm=control_state.air_setpoint_sccm,
             air_actual_sccm=control_state.air_actual_sccm,
-            device_status=f"KEITHLEY 2450 {device_status}",
+            multimeter_status=f"SCPI MULTIMETER {device_status}",
+            mfc_status=control_state.device_status,
+            mfc_port=control_state.mfc_port,
+            mfc_address=control_state.mfc_address,
+            mfc_serial=control_state.mfc_serial,
+            mfc_fluid=control_state.mfc_fluid,
+            mfc_capacity_sccm=control_state.mfc_capacity_sccm,
+            mfc_capacity_unit=control_state.mfc_capacity_unit,
+            mfc_temperature_c=control_state.mfc_temperature_c,
+            mfc_alarm_info=control_state.mfc_alarm_info,
         )
 
     def close(self):
@@ -79,6 +91,8 @@ class RealKeithley2450:
             self.resource_manager = None
 
     def _configure_resistance(self):
+        # Keep the source output off except during an actual reading. This is
+        # safer for sensors and mirrors the manual test procedure we validated.
         self.instrument.write("*CLS")
         self.instrument.write(":SENS:FUNC \"RES\"")
         self.instrument.write(":SENS:RES:RANG:AUTO ON")
@@ -86,6 +100,8 @@ class RealKeithley2450:
         self.instrument.write(":OUTP OFF")
 
     def _read_resistance_raw(self):
+        # The output is enabled only for the short READ? window, then disabled
+        # in finally so a timeout or parse error does not leave it on.
         self.instrument.write(":OUTP ON")
         try:
             time.sleep(0.1)
@@ -99,10 +115,12 @@ class RealKeithley2450:
         try:
             return float(first_value)
         except ValueError as exc:
-            raise ValueError(f"Could not parse Keithley resistance value: {raw_value}") from exc
+            raise ValueError(f"Could not parse resistance value: {raw_value}") from exc
 
     @staticmethod
     def _device_status(resistance):
+        # Keithley-style open circuits can come back as very large sentinel
+        # values. Treat them as status, not as plottable sensor resistance.
         if not math.isfinite(resistance):
             return "INVALID READING"
 

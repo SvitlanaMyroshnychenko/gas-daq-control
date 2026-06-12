@@ -15,6 +15,7 @@ class CSVLogger:
 
     def write(self, record):
         row = record.to_dict()
+        # FIELDNAMES controls column order and filters accidental extra keys.
         self.writer.writerow({field: row.get(field, "") for field in FIELDNAMES})
         self.file.flush()
 
@@ -33,6 +34,8 @@ class ExcelLogger:
 
     def write(self, record):
         row = record.to_dict()
+        # Save on every row so a long experiment still leaves a usable file if
+        # the app or device connection fails before close() is called.
         self.sheet.append([row.get(field, "") for field in FIELDNAMES])
         self.workbook.save(self.filename)
 

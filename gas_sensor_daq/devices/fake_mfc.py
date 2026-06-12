@@ -27,6 +27,17 @@ class FakeMFC:
     def set_heating(self, enabled):
         self.state.heating_on = bool(enabled)
 
+    def safe_shutdown(self):
+        # Simulation mirrors the safety policy expected from real hardware:
+        # Stop should leave all active flows and environment outputs off.
+        self.state.nh3_setpoint_sccm = 0.0
+        self.state.nh3_actual_sccm = 0.0
+        self.state.air_setpoint_sccm = 0.0
+        self.state.air_actual_sccm = 0.0
+        self.state.humidity_on = False
+        self.state.heating_on = False
+        self.state.device_status = "SIMULATED SAFE STOP"
+
     def get_state(self):
         self._update_actual_flows()
         return self.state
@@ -35,6 +46,8 @@ class FakeMFC:
         self.state.device_status = "SIMULATED CLOSED"
 
     def _update_actual_flows(self):
+        # Actual flow approaches the setpoint instead of jumping instantly, so
+        # UI/logging tests resemble real controller settling behavior.
         self.state.nh3_actual_sccm = self._approach(
             self.state.nh3_actual_sccm,
             self.state.nh3_setpoint_sccm,

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
     QFrame,
+    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -13,8 +14,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QSplitter,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -74,12 +78,15 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Gas Sensor DAQ & MFC Control Prototype")
-        self.setMinimumSize(1040, 650)
+        self.setMinimumSize(960, 600)
 
         self.manager = AcquisitionManager(self)
         self.time_data = []
         self.resistance_data = []
         self.temperature_data = []
+        self.completed_experiment_exists = False
+        self.max_log_preview_rows = 50
+        self.data_directory = self.manager.data_directory
 
         self.setup_ui()
         self.connect_manager_signals()
@@ -88,6 +95,7 @@ class MainWindow(QMainWindow):
     def setup_ui(self):
         self.status_label = QLabel("IDLE")
         self.status_label.setObjectName("statusBadge")
+        self.status_label.setProperty("state", "idle")
         self.status_label.setFixedSize(86, 20)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.file_label = QLabel("No file open")
@@ -99,16 +107,26 @@ class MainWindow(QMainWindow):
 
         self.format_selector = QComboBox()
         self.format_selector.addItems(["CSV", "Excel"])
-        self.format_selector.setFixedSize(112, 30)
+        self.format_selector.setFixedWidth(128)
+        self.format_selector.setFixedHeight(30)
+        self.data_folder_label = QLabel(self.data_directory)
+        self.data_folder_label.setObjectName("mutedLabel")
+        self.data_folder_label.setToolTip(self.data_directory)
+        self.data_folder_label.setFixedWidth(220)
+        self.data_folder_button = QPushButton("Folder")
+        self.data_folder_button.setToolTip("Select data folder")
+        self.data_folder_button.setFixedWidth(96)
+        self.data_folder_button.setFixedHeight(30)
+        self.data_folder_button.clicked.connect(self.choose_data_folder)
 
         self.multimeter_mode_selector = QComboBox()
-        self.multimeter_mode_selector.addItems(["Simulated", "Real Keithley"])
+        self.multimeter_mode_selector.addItems(["Simulated", "Real multimeter"])
         self.visa_device_selector = QComboBox()
         self.visa_device_selector.addItem("No scan yet", "")
         self.visa_device_selector.setMinimumWidth(0)
         self.multimeter_resource_input = QLineEdit()
         self.multimeter_resource_input.setPlaceholderText("USB0::...::INSTR")
-        self.multimeter_resource_input.setText(self.manager.keithley_resource)
+        self.multimeter_resource_input.setText(self.manager.multimeter_resource)
         self.multimeter_resource_input.setVisible(False)
         self.scan_visa_button = QPushButton("Scan")
         self.connect_multimeter_button = QPushButton("Connect")
@@ -117,16 +135,19 @@ class MainWindow(QMainWindow):
         self.multimeter_status_label = QLabel(self.manager.multimeter_status_text())
         self.multimeter_status_label.setObjectName("connectedLabel")
         self.multimeter_status_label.setWordWrap(True)
+        self.multimeter_status_label.setMaximumHeight(34)
         self.mfc_status_label = QLabel("Connected: simulated")
         self.mfc_status_label.setObjectName("connectedLabel")
         self.mfc_status_label.setWordWrap(True)
-        self.mfc_note_label = QLabel("Real Bronkhorst mode is read-only until gas testing is approved.")
+        self.mfc_status_label.setMaximumHeight(40)
+        self.mfc_note_label = QLabel("Real MFC mode is read-only until gas testing is approved.")
         self.mfc_note_label.setObjectName("mutedLabel")
         self.mfc_note_label.setWordWrap(True)
+        self.mfc_note_label.setMaximumHeight(28)
         self.mfc_mode_selector = QComboBox()
-        self.mfc_mode_selector.addItems(["Simulated", "Real Bronkhorst"])
+        self.mfc_mode_selector.addItems(["Simulated", "Real MFC"])
         self.mfc_port_selector = QComboBox()
-        self.mfc_port_selector.addItem(self.manager.bronkhorst_port, self.manager.bronkhorst_port)
+        self.mfc_port_selector.addItem(self.manager.mfc_port, self.manager.mfc_port)
         self.scan_mfc_button = QPushButton("Scan")
         self.connect_mfc_button = QPushButton("Connect")
         self.scan_mfc_button.setFixedWidth(52)
@@ -134,6 +155,8 @@ class MainWindow(QMainWindow):
 
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
+        self.start_button.setFixedWidth(58)
+        self.stop_button.setFixedWidth(58)
         self.start_button.setFixedHeight(34)
         self.stop_button.setFixedHeight(34)
         self.start_button.setObjectName("startButton")
@@ -208,10 +231,10 @@ class MainWindow(QMainWindow):
             "Temperature vs Time",
             "Temperature",
             "deg C",
-            "#f97316",
+            "#dc2626",
         )
         self.temperature_curve = self.temperature_plot.plot(
-            pen=pg.mkPen(color="#f97316", width=2)
+            pen=pg.mkPen(color="#dc2626", width=2)
         )
 
         self.log_table = QTableWidget(0, 7)
@@ -234,13 +257,21 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(self.create_toolbar())
 
-        body_layout = QHBoxLayout()
-        body_layout.setSpacing(8)
-        body_layout.addWidget(self.create_left_panel(), 0)
-        body_layout.addWidget(self.create_center_panel(), 1)
-        body_layout.addWidget(self.create_right_panel(), 0)
+        # Side panels are scrollable and the center pane is resizable so the
+        # app stays usable on lab laptops that are not running fullscreen.
+        body_splitter = QSplitter(Qt.Horizontal)
+        body_splitter.setObjectName("bodySplitter")
+        body_splitter.setChildrenCollapsible(False)
+        body_splitter.setHandleWidth(3)
+        body_splitter.addWidget(self.scroll_panel(self.create_left_panel()))
+        body_splitter.addWidget(self.create_center_panel())
+        body_splitter.addWidget(self.scroll_panel(self.create_right_panel()))
+        body_splitter.setStretchFactor(0, 0)
+        body_splitter.setStretchFactor(1, 1)
+        body_splitter.setStretchFactor(2, 0)
+        body_splitter.setSizes([320, 760, 320])
 
-        root_layout.addLayout(body_layout, 1)
+        root_layout.addWidget(body_splitter, 1)
         root.setLayout(root_layout)
         self.setCentralWidget(root)
 
@@ -261,14 +292,19 @@ class MainWindow(QMainWindow):
     def create_toolbar(self):
         toolbar = QFrame()
         toolbar.setObjectName("toolbar")
-        toolbar.setFixedHeight(58)
+        toolbar.setFixedHeight(62)
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(10, 5, 10, 5)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(8)
 
-        layout.addWidget(self.toolbar_status_block(), 2)
-        layout.addWidget(self.toolbar_format_block(), 0)
+        layout.addWidget(self.toolbar_status_block(), 0)
+        layout.addSpacing(8)
+        layout.addWidget(self.toolbar_inline_label("Save"))
+        layout.addWidget(self.format_selector)
+        layout.addSpacing(12)
+        layout.addWidget(self.data_folder_button)
+        layout.addSpacing(10)
         layout.addWidget(self.start_button, 0)
         layout.addWidget(self.stop_button, 0)
         layout.addStretch(1)
@@ -278,11 +314,18 @@ class MainWindow(QMainWindow):
         toolbar.setLayout(layout)
         return toolbar
 
+    def toolbar_inline_label(self, text):
+        label = QLabel(text)
+        label.setObjectName("caption")
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        label.setFixedWidth(42)
+        return label
+
     def toolbar_status_block(self):
         block = QFrame()
         block.setObjectName("toolbarBlock")
-        block.setMinimumWidth(300)
-        block.setFixedHeight(46)
+        block.setMinimumWidth(360)
+        block.setFixedHeight(50)
 
         layout = QGridLayout()
         layout.setContentsMargins(10, 4, 10, 4)
@@ -302,8 +345,9 @@ class MainWindow(QMainWindow):
     def toolbar_block(self, title, value_label, detail_label=None):
         block = QFrame()
         block.setObjectName("toolbarBlock")
-        block.setMinimumWidth(135)
-        block.setFixedHeight(46)
+        block.setMinimumWidth(125)
+        block.setMaximumWidth(140)
+        block.setFixedHeight(50)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 4, 10, 4)
@@ -322,7 +366,7 @@ class MainWindow(QMainWindow):
     def toolbar_format_block(self):
         block = QFrame()
         block.setObjectName("toolbarBlock")
-        block.setFixedHeight(46)
+        block.setFixedHeight(50)
         block.setFixedWidth(170)
         layout = QHBoxLayout()
         layout.setContentsMargins(10, 5, 10, 5)
@@ -336,9 +380,25 @@ class MainWindow(QMainWindow):
         block.setLayout(layout)
         return block
 
+    def toolbar_data_folder_block(self):
+        block = QFrame()
+        block.setObjectName("toolbarBlock")
+        block.setFixedHeight(50)
+        block.setFixedWidth(112)
+        layout = QHBoxLayout()
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(8)
+
+        layout.addWidget(self.data_folder_button)
+
+        block.setLayout(layout)
+        return block
+
     def create_left_panel(self):
         panel = QWidget()
-        panel.setFixedWidth(285)
+        panel.setMinimumWidth(305)
+        panel.setMaximumWidth(380)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -346,14 +406,13 @@ class MainWindow(QMainWindow):
         state_group = self.group("Current State", "blueGroup")
         state_layout = QVBoxLayout()
         state_layout.setSpacing(6)
-        state_layout.addWidget(self.metric_row("NH3 Flow", self.nh3_value_label))
-        state_layout.addWidget(self.metric_row("Air Flow", self.air_value_label))
+        state_layout.addWidget(self.metric_row("NH3 actual", self.nh3_value_label))
+        state_layout.addWidget(self.metric_row("Air actual", self.air_value_label))
         state_layout.addWidget(self.metric_row("Humidity", self.humidity_value_label))
         state_layout.addWidget(self.metric_row("Heating", self.heating_value_label))
         state_group.setLayout(state_layout)
 
         devices_group = self.group("Devices", "greenGroup")
-        devices_group.setMinimumHeight(330)
         devices_layout = QVBoxLayout()
         devices_layout.setSpacing(6)
         devices_layout.addWidget(self.create_multimeter_control())
@@ -370,8 +429,8 @@ class MainWindow(QMainWindow):
         readings_group.setLayout(readings_layout)
 
         layout.addWidget(state_group)
-        layout.addWidget(devices_group)
         layout.addWidget(readings_group)
+        layout.addWidget(devices_group)
         layout.addStretch()
         panel.setLayout(layout)
         return panel
@@ -383,7 +442,7 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
 
         resistance_group = self.group("Resistance vs Time", "blueGroup")
         resistance_layout = QVBoxLayout()
@@ -398,21 +457,35 @@ class MainWindow(QMainWindow):
         temperature_group.setLayout(temperature_layout)
 
         log_group = self.group("Log Preview", "greenGroup")
-        log_group.setFixedHeight(185)
+        log_group.setMinimumHeight(130)
         log_layout = QVBoxLayout()
         log_layout.setContentsMargins(8, 10, 8, 8)
         log_layout.addWidget(self.log_table)
         log_group.setLayout(log_layout)
 
-        layout.addWidget(resistance_group, 1)
-        layout.addWidget(temperature_group, 1)
-        layout.addWidget(log_group, 0)
+        center_splitter = QSplitter(Qt.Vertical)
+        # Operators can give more space to graphs or to the log preview during
+        # long runs without changing the acquisition logic.
+        center_splitter.setObjectName("centerSplitter")
+        center_splitter.setChildrenCollapsible(False)
+        center_splitter.setHandleWidth(5)
+        center_splitter.addWidget(resistance_group)
+        center_splitter.addWidget(temperature_group)
+        center_splitter.addWidget(log_group)
+        center_splitter.setStretchFactor(0, 2)
+        center_splitter.setStretchFactor(1, 2)
+        center_splitter.setStretchFactor(2, 1)
+        center_splitter.setSizes([260, 260, 180])
+
+        layout.addWidget(center_splitter, 1)
         panel.setLayout(layout)
         return panel
 
     def create_right_panel(self):
         panel = QWidget()
-        panel.setFixedWidth(290)
+        panel.setMinimumWidth(305)
+        panel.setMaximumWidth(380)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -459,6 +532,19 @@ class MainWindow(QMainWindow):
         panel.setLayout(layout)
         return panel
 
+    def scroll_panel(self, widget):
+        area = QScrollArea()
+        area.setObjectName("panelScroll")
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        area.setWidget(widget)
+        area.setMinimumWidth(widget.minimumWidth())
+        area.setMaximumWidth(widget.maximumWidth())
+        area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        return area
+
     def group(self, title, object_name):
         group = QGroupBox(title)
         group.setObjectName(object_name)
@@ -474,7 +560,8 @@ class MainWindow(QMainWindow):
     def metric_row(self, name, value_label):
         row = QFrame()
         row.setObjectName("metricRow")
-        row.setFixedHeight(34)
+        row.setMinimumHeight(32)
+        row.setMaximumHeight(36)
         layout = QHBoxLayout()
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(6)
@@ -507,10 +594,10 @@ class MainWindow(QMainWindow):
         row = QFrame()
         row.setObjectName("deviceRow")
         layout = QVBoxLayout()
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(3)
 
-        title = QLabel("Keithley 2450")
+        title = QLabel("Multimeter")
         mode_layout = QHBoxLayout()
         mode_layout.setContentsMargins(0, 0, 0, 0)
         mode_layout.setSpacing(5)
@@ -536,10 +623,10 @@ class MainWindow(QMainWindow):
         row = QFrame()
         row.setObjectName("deviceRow")
         layout = QVBoxLayout()
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(3)
 
-        title = QLabel("Bronkhorst F-201CV")
+        title = QLabel("MFC Controller")
 
         mode_layout = QHBoxLayout()
         mode_layout.setContentsMargins(0, 0, 0, 0)
@@ -568,13 +655,16 @@ class MainWindow(QMainWindow):
         plot.setLabel("left", left_label, units=units)
         plot.setLabel("bottom", "Time", units="s")
         plot.showGrid(x=True, y=True, alpha=0.22)
-        plot.setMinimumSize(0, 145)
-        plot.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        plot.setMinimumSize(0, 120)
+        plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         plot.getAxis("left").setPen(pg.mkPen("#64748b"))
         plot.getAxis("bottom").setPen(pg.mkPen("#64748b"))
         plot.getAxis("left").setTextPen(pg.mkPen("#334155"))
         plot.getAxis("bottom").setTextPen(pg.mkPen("#334155"))
-        plot.setTitle(title, color=color, size="10pt")
+        plot.setTitle(
+            f"<span style='color: #0f172a; font-weight: 700;'>{title}</span>",
+            size="10pt",
+        )
         return plot
 
     def configure_log_table(self):
@@ -585,7 +675,7 @@ class MainWindow(QMainWindow):
         self.log_table.verticalHeader().setVisible(False)
         self.log_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.log_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.log_table.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.log_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         header = self.log_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
@@ -596,7 +686,12 @@ class MainWindow(QMainWindow):
         return duration_input.value() * 1000
 
     def start_experiment(self):
+        # UI preview data is deliberately cleared before each run. The manager
+        # will create a new CSV/XLSX file for the new experiment.
         if not self.ensure_ready_to_start():
+            return
+
+        if self.completed_experiment_exists and not self.confirm_new_experiment():
             return
 
         self.time_data.clear()
@@ -607,46 +702,105 @@ class MainWindow(QMainWindow):
         self.resistance_curve.setData([], [])
         self.temperature_curve.setData([], [])
 
-        self.manager.start_experiment(self.format_selector.currentText())
+        self.manager.start_experiment(
+            self.format_selector.currentText(),
+            self.data_directory,
+        )
+
+    def choose_data_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select data folder",
+            self.data_directory,
+        )
+        if not folder:
+            return
+
+        self.data_directory = folder
+        self.data_folder_label.setText(self.compact_path(folder))
+        self.data_folder_label.setToolTip(folder)
+        self.file_label.setText(f"Data folder: {folder}")
+
+    @staticmethod
+    def compact_path(path, max_length=28):
+        if len(path) <= max_length:
+            return path
+        return "..." + path[-(max_length - 3):]
+
+    def confirm_new_experiment(self):
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle("Start new experiment?")
+        dialog.setText("Start a new experiment?")
+        dialog.setInformativeText(
+            "A new data file will be created. Current graph preview and log preview "
+            "will be cleared. Active controls were returned to a safe state after Stop."
+        )
+        start_button = dialog.addButton("Start New Experiment", QMessageBox.AcceptRole)
+        dialog.addButton("Cancel", QMessageBox.RejectRole)
+        dialog.setDefaultButton(start_button)
+        dialog.exec()
+        return dialog.clickedButton() == start_button
 
     def ensure_ready_to_start(self):
-        if self.multimeter_mode_selector.currentText() == "Real Keithley":
+        # Choosing "Real ..." in the UI is not enough: the device must be
+        # connected first so Start cannot silently fall back to simulation.
+        if self.is_real_multimeter_mode():
             if self.manager.multimeter_mode != "real":
-                self.on_device_error("Select Connect before starting with Real Keithley.")
+                self.on_device_error("Select Connect before starting with a real multimeter.")
                 return False
 
-        if self.mfc_mode_selector.currentText() == "Real Bronkhorst":
+        if self.is_real_mfc_mode():
             if self.manager.mfc_mode != "real":
-                self.on_device_error("Select Connect before starting with Real Bronkhorst.")
+                self.on_device_error("Select Connect before starting with a real MFC controller.")
                 return False
 
         return True
 
+    def is_real_multimeter_mode(self):
+        return self.multimeter_mode_selector.currentText() == "Real multimeter"
+
+    def is_real_mfc_mode(self):
+        return self.mfc_mode_selector.currentText() == "Real MFC"
+
     def on_experiment_started(self, filename):
+        self.completed_experiment_exists = False
         self.format_selector.setEnabled(False)
+        self.data_folder_button.setEnabled(False)
         self.status_label.setText("RUNNING")
-        self.status_label.setProperty("running", True)
-        self.status_label.style().unpolish(self.status_label)
-        self.status_label.style().polish(self.status_label)
+        self.set_status_badge_state("running")
         self.file_label.setText(filename)
 
     def on_experiment_stopped(self, message):
+        self.completed_experiment_exists = True
         self.format_selector.setEnabled(True)
+        self.data_folder_button.setEnabled(True)
         self.status_label.setText("STOPPED")
-        self.status_label.setProperty("running", False)
-        self.status_label.style().unpolish(self.status_label)
-        self.status_label.style().polish(self.status_label)
+        self.set_status_badge_state("stopped")
+        self.reset_duration_controls()
         self.file_label.setText(message)
 
     def on_device_error(self, message):
         self.status_label.setText("ERROR")
-        self.status_label.setProperty("running", False)
-        self.status_label.style().unpolish(self.status_label)
-        self.status_label.style().polish(self.status_label)
+        self.set_status_badge_state("error")
         self.file_label.setText(message)
 
+    def set_status_badge_state(self, state):
+        self.status_label.setProperty("state", state)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+
+    def reset_duration_controls(self):
+        for duration_control in (
+            self.nh3_duration,
+            self.air_duration,
+            self.humidity_duration,
+            self.heating_duration,
+        ):
+            duration_control.setValue(0)
+
     def on_multimeter_mode_changed(self, text):
-        is_real = text == "Real Keithley"
+        is_real = text == "Real multimeter"
         self.visa_device_selector.setEnabled(is_real)
         self.multimeter_resource_input.setEnabled(is_real)
         self.scan_visa_button.setEnabled(is_real)
@@ -694,8 +848,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def compact_instrument_label(idn, resource):
         parts = [part.strip() for part in idn.split(",")]
-        if len(parts) >= 3 and "2450" in parts[1]:
-            return f"Keithley 2450 S/N {parts[2]}"
+        if len(parts) >= 3:
+            return f"Multimeter S/N {parts[2]}"
 
         if idn and not idn.startswith("No *IDN?"):
             return idn[:38]
@@ -703,10 +857,10 @@ class MainWindow(QMainWindow):
         return resource[:38]
 
     def connect_multimeter(self):
-        if self.multimeter_mode_selector.currentText() == "Real Keithley":
+        if self.is_real_multimeter_mode():
             resource = self.multimeter_resource_input.text().strip()
             if not resource:
-                self.on_device_error("Enter Keithley VISA resource before connecting.")
+                self.on_device_error("Enter multimeter VISA resource before connecting.")
                 return
 
             ok = self.manager.set_multimeter_mode("real", resource)
@@ -715,21 +869,19 @@ class MainWindow(QMainWindow):
 
         if ok:
             self.status_label.setText("IDLE")
-            self.status_label.setProperty("running", False)
-            self.status_label.style().unpolish(self.status_label)
-            self.status_label.style().polish(self.status_label)
+            self.set_status_badge_state("idle")
             self.file_label.setText("Multimeter ready")
 
     def on_multimeter_changed(self, mode, status):
         if mode == "real":
-            self.multimeter_status_label.setText("Connected: real Keithley")
+            self.multimeter_status_label.setText("Connected: real multimeter")
             self.multimeter_status_label.setToolTip(status)
         else:
             self.multimeter_status_label.setText("Connected: simulated")
             self.multimeter_status_label.setToolTip(status)
 
     def on_mfc_mode_changed(self, text):
-        is_real = text == "Real Bronkhorst"
+        is_real = text == "Real MFC"
         self.mfc_port_selector.setEnabled(is_real)
         self.scan_mfc_button.setEnabled(is_real)
         self.connect_mfc_button.setText("Connect" if is_real else "Use")
@@ -767,11 +919,11 @@ class MainWindow(QMainWindow):
         self.file_label.setText(f"Found {len(ports)} COM port(s)")
 
     def connect_mfc(self):
-        if self.mfc_mode_selector.currentText() == "Real Bronkhorst":
+        if self.is_real_mfc_mode():
             port = self.mfc_port_selector.currentData() or self.mfc_port_selector.currentText()
             port = port.strip()
             if not port:
-                self.on_device_error("Select Bronkhorst COM port before connecting.")
+                self.on_device_error("Select MFC COM port before connecting.")
                 return
 
             ok = self.manager.set_mfc_mode("real", port=port)
@@ -780,9 +932,7 @@ class MainWindow(QMainWindow):
 
         if ok:
             self.status_label.setText("IDLE")
-            self.status_label.setProperty("running", False)
-            self.status_label.style().unpolish(self.status_label)
-            self.status_label.style().polish(self.status_label)
+            self.set_status_badge_state("idle")
             self.file_label.setText("MFC ready")
 
     def on_mfc_changed(self, mode, status):
@@ -941,7 +1091,9 @@ class MainWindow(QMainWindow):
         return "OPEN" if suffix == " Ohm" else "--"
 
     def add_log_preview_row(self, data, event):
-        if self.log_table.rowCount() >= 5:
+        # The preview is capped for UI performance. The logger still writes the
+        # complete experiment history to disk.
+        if self.log_table.rowCount() >= self.max_log_preview_rows:
             self.log_table.removeRow(0)
 
         row = self.log_table.rowCount()
@@ -969,56 +1121,87 @@ class MainWindow(QMainWindow):
     def apply_styles(self):
         self.setStyleSheet("""
             QWidget#appBackground {
-                background: #f6f8fb;
+                background: #f3f6fa;
             }
             QFrame#toolbar {
                 background: #ffffff;
-                border: 1px solid #d7e1ee;
+                border: 1px solid #dce5ef;
                 border-radius: 8px;
             }
+            QSplitter#bodySplitter::handle {
+                background: #edf2f7;
+                width: 3px;
+                margin: 8px 0;
+                border-radius: 1px;
+            }
+            QSplitter#centerSplitter::handle {
+                background: #e2e8f0;
+                height: 5px;
+                margin: 3px 0;
+                border-radius: 2px;
+            }
+            QSplitter#centerSplitter::handle:hover {
+                background: #cbd5e1;
+            }
+            QScrollArea#panelScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#panelScroll > QWidget > QWidget {
+                background: transparent;
+            }
             QFrame#toolbarBlock {
-                background: #f1f5f9;
-                border: 1px solid #e2e8f0;
-                border-radius: 6px;
+                background: transparent;
+                border: none;
+                border-radius: 0;
             }
             QGroupBox {
                 background: #ffffff;
-                border: 1px solid #d7e1ee;
-                border-radius: 8px;
-                margin-top: 14px;
-                padding: 8px;
+                border: 1px solid #dce5ef;
+                border-top: 3px solid #64748b;
+                border-radius: 0;
+                margin-top: 20px;
+                padding: 9px;
                 font-weight: 700;
                 color: #102033;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-                background: #ffffff;
+                subcontrol-position: top left;
+                left: 12px;
+                top: 1px;
+                padding: 0 10px 2px 10px;
+                background: #f3f6fa;
+                color: #334155;
+                font-size: 12px;
             }
             QGroupBox#blueGroup {
-                border-color: #3b82f6;
+                border-top-color: #64748b;
             }
             QGroupBox#greenGroup {
-                border-color: #22c55e;
+                border-top-color: #64748b;
             }
             QGroupBox#purpleGroup {
-                border-color: #8b5cf6;
+                border-top-color: #64748b;
             }
             QGroupBox#orangeGroup {
-                border-color: #f97316;
+                border-top-color: #64748b;
             }
             QGroupBox#tealGroup {
-                border-color: #14b8a6;
+                border-top-color: #64748b;
             }
             QGroupBox#yellowGroup {
-                border-color: #eab308;
+                border-top-color: #64748b;
             }
             QFrame#metricRow,
             QFrame#deviceRow {
                 background: #f8fafc;
                 border: 1px solid #edf2f7;
                 border-radius: 6px;
+            }
+            QFrame#metricRow {
+                min-height: 32px;
+                max-height: 36px;
             }
             QLabel {
                 color: #233244;
@@ -1030,6 +1213,11 @@ class MainWindow(QMainWindow):
                 color: #64748b;
                 font-size: 11px;
                 font-weight: 500;
+            }
+            QLabel#toolbarSectionLabel {
+                color: #334155;
+                font-size: 11px;
+                font-weight: 700;
             }
             QLabel#metricValue,
             QLabel#toolbarValue {
@@ -1044,23 +1232,81 @@ class MainWindow(QMainWindow):
                 padding: 3px 8px;
                 font-weight: 700;
             }
-            QLabel#statusBadge[running="true"] {
+            QLabel#statusBadge[state="running"] {
                 background: #dbeafe;
                 color: #1d4ed8;
+            }
+            QLabel#statusBadge[state="error"] {
+                background: #fee2e2;
+                color: #dc2626;
+            }
+            QLabel#statusBadge[state="stopped"] {
+                background: #fee2e2;
+                color: #dc2626;
             }
             QLabel#connectedLabel {
                 color: #16a34a;
                 font-size: 11px;
                 font-weight: 600;
             }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 7px;
+                margin: 2px 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                border-radius: 3px;
+                min-height: 36px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #94a3b8;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0;
+                background: transparent;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
             QComboBox,
             QSpinBox,
             QLineEdit {
                 border: 1px solid #cbd5e1;
                 border-radius: 5px;
-                padding: 1px 6px;
+                padding: 2px 7px;
                 background: #ffffff;
                 color: #172033;
+                min-height: 26px;
+            }
+            QComboBox:disabled,
+            QSpinBox:disabled,
+            QLineEdit:disabled {
+                color: #94a3b8;
+                background: #f1f5f9;
+            }
+            QComboBox {
+                padding-right: 28px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border: none;
+                border-left: 1px solid transparent;
+                border-top-right-radius: 5px;
+                border-bottom-right-radius: 5px;
+            }
+            QComboBox::drop-down:hover {
+                background: #f1f5f9;
+                border-left-color: #e2e8f0;
+            }
+            QComboBox::down-arrow {
+                image: url(gas_sensor_daq/ui/assets/chevron_down.svg);
+                width: 12px;
+                height: 12px;
             }
             QPushButton {
                 min-height: 28px;
@@ -1071,7 +1317,8 @@ class MainWindow(QMainWindow):
                 color: #172033;
             }
             QPushButton:hover {
-                background: #f1f5f9;
+                background: #f8fafc;
+                border-color: #94a3b8;
             }
             QPushButton#stepButton {
                 min-height: 26px;
@@ -1081,11 +1328,11 @@ class MainWindow(QMainWindow):
             }
             QGroupBox#greenGroup QComboBox,
             QGroupBox#greenGroup QLineEdit {
-                min-height: 22px;
+                min-height: 24px;
                 font-size: 11px;
             }
             QGroupBox#greenGroup QPushButton {
-                min-height: 22px;
+                min-height: 24px;
                 padding: 2px 5px;
                 font-size: 11px;
             }
@@ -1093,14 +1340,23 @@ class MainWindow(QMainWindow):
             QPushButton#primaryButton {
                 color: #15803d;
                 border-color: #22c55e;
-                background: #f0fdf4;
+                background: #ecfdf3;
                 font-weight: 700;
+            }
+            QPushButton#startButton:hover,
+            QPushButton#primaryButton:hover {
+                background: #dcfce7;
+                border-color: #16a34a;
             }
             QPushButton#stopButton {
                 color: #dc2626;
                 border-color: #ef4444;
                 background: #fef2f2;
                 font-weight: 700;
+            }
+            QPushButton#stopButton:hover {
+                background: #fee2e2;
+                border-color: #dc2626;
             }
             QTableWidget {
                 background: #ffffff;
