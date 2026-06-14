@@ -6,7 +6,6 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
     QFrame,
-    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -87,6 +86,7 @@ class MainWindow(QMainWindow):
         self.completed_experiment_exists = False
         self.max_log_preview_rows = 50
         self.data_directory = self.manager.data_directory
+        self.current_file_path = ""
 
         self.setup_ui()
         self.connect_manager_signals()
@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("IDLE")
         self.status_label.setObjectName("statusBadge")
         self.status_label.setProperty("state", "idle")
-        self.status_label.setFixedSize(86, 20)
+        self.status_label.setFixedSize(100, 28)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.file_label = QLabel("No file open")
         self.file_label.setObjectName("mutedLabel")
@@ -109,16 +109,6 @@ class MainWindow(QMainWindow):
         self.format_selector.addItems(["CSV", "Excel"])
         self.format_selector.setFixedWidth(128)
         self.format_selector.setFixedHeight(30)
-        self.data_folder_label = QLabel(self.data_directory)
-        self.data_folder_label.setObjectName("mutedLabel")
-        self.data_folder_label.setToolTip(self.data_directory)
-        self.data_folder_label.setFixedWidth(220)
-        self.data_folder_button = QPushButton("Folder")
-        self.data_folder_button.setToolTip("Select data folder")
-        self.data_folder_button.setFixedWidth(96)
-        self.data_folder_button.setFixedHeight(30)
-        self.data_folder_button.clicked.connect(self.choose_data_folder)
-
         self.multimeter_mode_selector = QComboBox()
         self.multimeter_mode_selector.addItems(["Simulated", "Real multimeter"])
         self.visa_device_selector = QComboBox()
@@ -155,8 +145,8 @@ class MainWindow(QMainWindow):
 
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
-        self.start_button.setFixedWidth(58)
-        self.stop_button.setFixedWidth(58)
+        self.start_button.setFixedWidth(88)
+        self.stop_button.setFixedWidth(88)
         self.start_button.setFixedHeight(34)
         self.stop_button.setFixedHeight(34)
         self.start_button.setObjectName("startButton")
@@ -175,6 +165,10 @@ class MainWindow(QMainWindow):
         self.temperature_value_label = self.metric_value("--")
         self.nh3_actual_label = self.metric_value("--")
         self.air_actual_label = self.metric_value("--")
+        self.resistance_value_label.setProperty("metricColor", "blue")
+        self.temperature_value_label.setProperty("metricColor", "orange")
+        self.nh3_actual_label.setProperty("metricColor", "purple")
+        self.air_actual_label.setProperty("metricColor", "teal")
 
         self.nh3_control = Stepper(0, 100, 0, " sccm")
         self.air_control = Stepper(0, 500, 100, " sccm")
@@ -269,7 +263,7 @@ class MainWindow(QMainWindow):
         body_splitter.setStretchFactor(0, 0)
         body_splitter.setStretchFactor(1, 1)
         body_splitter.setStretchFactor(2, 0)
-        body_splitter.setSizes([320, 760, 320])
+        body_splitter.setSizes([330, 900, 330])
 
         root_layout.addWidget(body_splitter, 1)
         root.setLayout(root_layout)
@@ -292,19 +286,14 @@ class MainWindow(QMainWindow):
     def create_toolbar(self):
         toolbar = QFrame()
         toolbar.setObjectName("toolbar")
-        toolbar.setFixedHeight(62)
+        toolbar.setFixedHeight(78)
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(12, 6, 12, 6)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(10)
 
-        layout.addWidget(self.toolbar_status_block(), 0)
-        layout.addSpacing(8)
-        layout.addWidget(self.toolbar_inline_label("Save"))
-        layout.addWidget(self.format_selector)
-        layout.addSpacing(12)
-        layout.addWidget(self.data_folder_button)
-        layout.addSpacing(10)
+        layout.addWidget(self.toolbar_status_block(), 2)
+        layout.addWidget(self.toolbar_format_block(), 0)
         layout.addWidget(self.start_button, 0)
         layout.addWidget(self.stop_button, 0)
         layout.addStretch(1)
@@ -325,12 +314,12 @@ class MainWindow(QMainWindow):
         block = QFrame()
         block.setObjectName("toolbarBlock")
         block.setMinimumWidth(360)
-        block.setFixedHeight(50)
+        block.setFixedHeight(58)
 
         layout = QGridLayout()
-        layout.setContentsMargins(10, 4, 10, 4)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(1)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(2)
 
         title_label = QLabel("Status")
         title_label.setObjectName("caption")
@@ -380,24 +369,10 @@ class MainWindow(QMainWindow):
         block.setLayout(layout)
         return block
 
-    def toolbar_data_folder_block(self):
-        block = QFrame()
-        block.setObjectName("toolbarBlock")
-        block.setFixedHeight(50)
-        block.setFixedWidth(112)
-        layout = QHBoxLayout()
-        layout.setContentsMargins(10, 5, 10, 5)
-        layout.setSpacing(8)
-
-        layout.addWidget(self.data_folder_button)
-
-        block.setLayout(layout)
-        return block
-
     def create_left_panel(self):
         panel = QWidget()
         panel.setMinimumWidth(305)
-        panel.setMaximumWidth(380)
+        panel.setMaximumWidth(360)
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -406,18 +381,11 @@ class MainWindow(QMainWindow):
         state_group = self.group("Current State", "blueGroup")
         state_layout = QVBoxLayout()
         state_layout.setSpacing(6)
-        state_layout.addWidget(self.metric_row("NH3 actual", self.nh3_value_label))
-        state_layout.addWidget(self.metric_row("Air actual", self.air_value_label))
+        state_layout.addWidget(self.metric_row("NH3 Flow", self.nh3_value_label))
+        state_layout.addWidget(self.metric_row("Air Flow", self.air_value_label))
         state_layout.addWidget(self.metric_row("Humidity", self.humidity_value_label))
         state_layout.addWidget(self.metric_row("Heating", self.heating_value_label))
         state_group.setLayout(state_layout)
-
-        devices_group = self.group("Devices", "greenGroup")
-        devices_layout = QVBoxLayout()
-        devices_layout.setSpacing(6)
-        devices_layout.addWidget(self.create_multimeter_control())
-        devices_layout.addWidget(self.create_mfc_control())
-        devices_group.setLayout(devices_layout)
 
         readings_group = self.group("Live Readings", "purpleGroup")
         readings_layout = QVBoxLayout()
@@ -427,6 +395,13 @@ class MainWindow(QMainWindow):
         readings_layout.addWidget(self.metric_row("NH3 actual", self.nh3_actual_label))
         readings_layout.addWidget(self.metric_row("Air actual", self.air_actual_label))
         readings_group.setLayout(readings_layout)
+
+        devices_group = self.group("Devices", "greenGroup")
+        devices_layout = QVBoxLayout()
+        devices_layout.setSpacing(6)
+        devices_layout.addWidget(self.create_multimeter_control())
+        devices_layout.addWidget(self.create_mfc_control())
+        devices_group.setLayout(devices_layout)
 
         layout.addWidget(state_group)
         layout.addWidget(readings_group)
@@ -484,7 +459,7 @@ class MainWindow(QMainWindow):
     def create_right_panel(self):
         panel = QWidget()
         panel.setMinimumWidth(305)
-        panel.setMaximumWidth(380)
+        panel.setMaximumWidth(360)
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -494,7 +469,7 @@ class MainWindow(QMainWindow):
         gas_layout = QGridLayout()
         gas_layout.setContentsMargins(10, 12, 10, 10)
         gas_layout.setHorizontalSpacing(8)
-        gas_layout.setVerticalSpacing(7)
+        gas_layout.setVerticalSpacing(9)
         gas_layout.addWidget(QLabel("NH3 flow"), 0, 0)
         gas_layout.addWidget(self.nh3_control, 0, 1)
         gas_layout.addWidget(QLabel("NH3 duration"), 1, 0)
@@ -513,7 +488,7 @@ class MainWindow(QMainWindow):
         env_layout = QGridLayout()
         env_layout.setContentsMargins(10, 12, 10, 10)
         env_layout.setHorizontalSpacing(8)
-        env_layout.setVerticalSpacing(7)
+        env_layout.setVerticalSpacing(9)
         env_layout.addWidget(QLabel("Humidity"), 0, 0)
         env_layout.addWidget(self.humidity_off_button, 0, 1)
         env_layout.addWidget(self.humidity_on_button, 0, 2)
@@ -707,26 +682,6 @@ class MainWindow(QMainWindow):
             self.data_directory,
         )
 
-    def choose_data_folder(self):
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select data folder",
-            self.data_directory,
-        )
-        if not folder:
-            return
-
-        self.data_directory = folder
-        self.data_folder_label.setText(self.compact_path(folder))
-        self.data_folder_label.setToolTip(folder)
-        self.file_label.setText(f"Data folder: {folder}")
-
-    @staticmethod
-    def compact_path(path, max_length=28):
-        if len(path) <= max_length:
-            return path
-        return "..." + path[-(max_length - 3):]
-
     def confirm_new_experiment(self):
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Question)
@@ -765,8 +720,8 @@ class MainWindow(QMainWindow):
 
     def on_experiment_started(self, filename):
         self.completed_experiment_exists = False
+        self.current_file_path = filename
         self.format_selector.setEnabled(False)
-        self.data_folder_button.setEnabled(False)
         self.status_label.setText("RUNNING")
         self.set_status_badge_state("running")
         self.file_label.setText(filename)
@@ -774,7 +729,6 @@ class MainWindow(QMainWindow):
     def on_experiment_stopped(self, message):
         self.completed_experiment_exists = True
         self.format_selector.setEnabled(True)
-        self.data_folder_button.setEnabled(True)
         self.status_label.setText("STOPPED")
         self.set_status_badge_state("stopped")
         self.reset_duration_controls()
@@ -1126,19 +1080,17 @@ class MainWindow(QMainWindow):
             QFrame#toolbar {
                 background: #ffffff;
                 border: 1px solid #dce5ef;
-                border-radius: 8px;
+                border-radius: 0;
             }
             QSplitter#bodySplitter::handle {
-                background: #edf2f7;
+                background: #d7e0eb;
                 width: 3px;
-                margin: 8px 0;
-                border-radius: 1px;
+                margin: 0;
             }
             QSplitter#centerSplitter::handle {
-                background: #e2e8f0;
-                height: 5px;
-                margin: 3px 0;
-                border-radius: 2px;
+                background: #d7e0eb;
+                height: 3px;
+                margin: 0;
             }
             QSplitter#centerSplitter::handle:hover {
                 background: #cbd5e1;
@@ -1157,51 +1109,32 @@ class MainWindow(QMainWindow):
             }
             QGroupBox {
                 background: #ffffff;
-                border: 1px solid #dce5ef;
-                border-top: 3px solid #64748b;
+                border: 1px solid #cfd8e3;
                 border-radius: 0;
-                margin-top: 20px;
-                padding: 9px;
+                margin-top: 22px;
+                padding: 8px;
                 font-weight: 700;
                 color: #102033;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-                left: 12px;
-                top: 1px;
-                padding: 0 10px 2px 10px;
+                left: 10px;
+                top: 0px;
+                padding: 0 8px 2px 8px;
                 background: #f3f6fa;
-                color: #334155;
+                color: #0f172a;
                 font-size: 12px;
-            }
-            QGroupBox#blueGroup {
-                border-top-color: #64748b;
-            }
-            QGroupBox#greenGroup {
-                border-top-color: #64748b;
-            }
-            QGroupBox#purpleGroup {
-                border-top-color: #64748b;
-            }
-            QGroupBox#orangeGroup {
-                border-top-color: #64748b;
-            }
-            QGroupBox#tealGroup {
-                border-top-color: #64748b;
-            }
-            QGroupBox#yellowGroup {
-                border-top-color: #64748b;
             }
             QFrame#metricRow,
             QFrame#deviceRow {
                 background: #f8fafc;
-                border: 1px solid #edf2f7;
-                border-radius: 6px;
+                border: 1px solid #e2e8f0;
+                border-radius: 0;
             }
             QFrame#metricRow {
-                min-height: 32px;
-                max-height: 36px;
+                min-height: 34px;
+                max-height: 38px;
             }
             QLabel {
                 color: #233244;
@@ -1219,16 +1152,37 @@ class MainWindow(QMainWindow):
                 font-size: 11px;
                 font-weight: 700;
             }
+            QLabel#sectionLabel,
+            QLabel#statusLineLabel {
+                color: #0f172a;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel#warningLabel {
+                background: #fffbeb;
+                border: 1px solid #facc15;
+                border-radius: 6px;
+                color: #92400e;
+                padding: 7px 8px;
+                font-size: 12px;
+                font-weight: 600;
+            }
             QLabel#metricValue,
             QLabel#toolbarValue {
                 color: #0f172a;
                 font-size: 15px;
                 font-weight: 700;
             }
+            QLabel#metricValue[metricColor="blue"],
+            QLabel#metricValue[metricColor="orange"],
+            QLabel#metricValue[metricColor="purple"],
+            QLabel#metricValue[metricColor="teal"] {
+                color: #0f172a;
+            }
             QLabel#statusBadge {
                 background: #dcfce7;
                 color: #15803d;
-                border-radius: 10px;
+                border-radius: 12px;
                 padding: 3px 8px;
                 font-weight: 700;
             }
@@ -1275,7 +1229,7 @@ class MainWindow(QMainWindow):
             QSpinBox,
             QLineEdit {
                 border: 1px solid #cbd5e1;
-                border-radius: 5px;
+                border-radius: 2px;
                 padding: 2px 7px;
                 background: #ffffff;
                 color: #172033;
@@ -1322,6 +1276,7 @@ class MainWindow(QMainWindow):
             }
             QPushButton#stepButton {
                 min-height: 26px;
+                border-radius: 5px;
                 padding: 0;
                 font-size: 14px;
                 font-weight: 700;
@@ -1358,11 +1313,16 @@ class MainWindow(QMainWindow):
                 background: #fee2e2;
                 border-color: #dc2626;
             }
+            QPushButton:disabled {
+                color: #9ca3af;
+                background: #f1f5f9;
+                border-color: #e5e7eb;
+            }
             QTableWidget {
                 background: #ffffff;
                 alternate-background-color: #f8fafc;
                 border: 1px solid #e2e8f0;
-                border-radius: 6px;
+                border-radius: 2px;
                 gridline-color: #e2e8f0;
                 color: #102033;
                 selection-background-color: #dbeafe;
