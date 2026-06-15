@@ -1,13 +1,14 @@
 import math
+from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QComboBox,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QSpinBox,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -76,7 +78,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Gas Sensor DAQ & MFC Control Prototype")
+        self.assets_dir = Path(__file__).resolve().parent / "assets"
+        self.setWindowTitle("Gas Sensor DAQ & MFC Control")
+        self.setWindowIcon(QIcon(str(self.assets_dir / "microchip.png")))
+
         self.setMinimumSize(960, 600)
 
         self.manager = AcquisitionManager(self)
@@ -108,7 +113,25 @@ class MainWindow(QMainWindow):
         self.format_selector = QComboBox()
         self.format_selector.addItems(["CSV", "Excel"])
         self.format_selector.setFixedWidth(128)
-        self.format_selector.setFixedHeight(30)
+        self.format_selector.setFixedHeight(40)
+        self.device_setup_button = QPushButton("Device Setup")
+        self.device_setup_button.setIcon(QIcon(str(self.assets_dir / "setting.png")))
+        self.device_setup_button.setIconSize(QSize(18, 18))
+        self.device_setup_button.setFixedSize(136, 40)
+        self.device_setup_button.clicked.connect(self.toggle_device_setup)
+        self.open_data_folder_button = QPushButton("Open Data Folder")
+        self.open_data_folder_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        self.open_data_folder_button.clicked.connect(self.open_data_folder)
+        self.view_full_log_button = QPushButton("View Full Log")
+        self.view_full_log_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogListView))
+        self.view_full_log_button.clicked.connect(self.open_current_log)
+        self.bottom_acquisition_label = QLabel("Acquisition idle")
+        self.bottom_acquisition_label.setObjectName("statusLineLabel")
+        self.bottom_mode_label = QLabel("Simulation mode ready")
+        self.bottom_mode_label.setObjectName("mutedLabel")
+        self.manual_mode_label = QLabel("Simulated MFC mode")
+        self.manual_mode_label.setObjectName("warningLabel")
+        self.manual_mode_label.setWordWrap(True)
         self.multimeter_mode_selector = QComboBox()
         self.multimeter_mode_selector.addItems(["Simulated", "Real multimeter"])
         self.visa_device_selector = QComboBox()
@@ -119,7 +142,7 @@ class MainWindow(QMainWindow):
         self.multimeter_resource_input.setText(self.manager.multimeter_resource)
         self.multimeter_resource_input.setVisible(False)
         self.scan_visa_button = QPushButton("Scan")
-        self.connect_multimeter_button = QPushButton("Connect")
+        self.connect_multimeter_button = QPushButton("Use")
         self.scan_visa_button.setFixedWidth(52)
         self.connect_multimeter_button.setFixedWidth(68)
         self.multimeter_status_label = QLabel(self.manager.multimeter_status_text())
@@ -134,23 +157,29 @@ class MainWindow(QMainWindow):
         self.mfc_note_label.setObjectName("mutedLabel")
         self.mfc_note_label.setWordWrap(True)
         self.mfc_note_label.setMaximumHeight(28)
+        self.multimeter_summary_label = QLabel("simulated")
+        self.multimeter_summary_label.setObjectName("connectedLabel")
+        self.mfc_summary_label = QLabel("simulated")
+        self.mfc_summary_label.setObjectName("connectedLabel")
         self.mfc_mode_selector = QComboBox()
         self.mfc_mode_selector.addItems(["Simulated", "Real MFC"])
         self.mfc_port_selector = QComboBox()
         self.mfc_port_selector.addItem(self.manager.mfc_port, self.manager.mfc_port)
         self.scan_mfc_button = QPushButton("Scan")
-        self.connect_mfc_button = QPushButton("Connect")
+        self.connect_mfc_button = QPushButton("Use")
         self.scan_mfc_button.setFixedWidth(52)
         self.connect_mfc_button.setFixedWidth(68)
 
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
-        self.start_button.setFixedWidth(88)
-        self.stop_button.setFixedWidth(88)
-        self.start_button.setFixedHeight(34)
-        self.stop_button.setFixedHeight(34)
+        self.start_button.setFixedSize(88, 40)
+        self.stop_button.setFixedSize(88, 40)
         self.start_button.setObjectName("startButton")
         self.stop_button.setObjectName("stopButton")
+        self.start_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.stop_button.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
+        self.start_button.setIconSize(QSize(16, 16))
+        self.stop_button.setIconSize(QSize(16, 16))
         self.start_button.clicked.connect(self.start_experiment)
         self.stop_button.clicked.connect(
             lambda _checked=False: self.manager.stop_experiment()
@@ -251,21 +280,15 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(self.create_toolbar())
 
-        # Side panels are scrollable and the center pane is resizable so the
-        # app stays usable on lab laptops that are not running fullscreen.
-        body_splitter = QSplitter(Qt.Horizontal)
-        body_splitter.setObjectName("bodySplitter")
-        body_splitter.setChildrenCollapsible(False)
-        body_splitter.setHandleWidth(3)
-        body_splitter.addWidget(self.scroll_panel(self.create_left_panel()))
-        body_splitter.addWidget(self.create_center_panel())
-        body_splitter.addWidget(self.scroll_panel(self.create_right_panel()))
-        body_splitter.setStretchFactor(0, 0)
-        body_splitter.setStretchFactor(1, 1)
-        body_splitter.setStretchFactor(2, 0)
-        body_splitter.setSizes([330, 900, 330])
+        body_layout = QHBoxLayout()
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(8)
+        body_layout.addWidget(self.scroll_panel(self.create_left_panel()), 0)
+        body_layout.addWidget(self.create_center_panel(), 1)
+        body_layout.addWidget(self.scroll_panel(self.create_right_panel()), 0)
 
-        root_layout.addWidget(body_splitter, 1)
+        root_layout.addLayout(body_layout, 1)
+        root_layout.addWidget(self.create_bottom_bar())
         root.setLayout(root_layout)
         self.setCentralWidget(root)
 
@@ -286,22 +309,48 @@ class MainWindow(QMainWindow):
     def create_toolbar(self):
         toolbar = QFrame()
         toolbar.setObjectName("toolbar")
-        toolbar.setFixedHeight(78)
+        toolbar.setFixedHeight(68)
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(18, 8, 12, 8)
+        layout.setSpacing(14)
 
-        layout.addWidget(self.toolbar_status_block(), 2)
+        layout.addWidget(self.toolbar_status_block(), 1)
+        layout.addWidget(self.toolbar_divider())
+        layout.addWidget(self.toolbar_block("Elapsed", self.elapsed_label), 0)
+        layout.addWidget(self.toolbar_divider())
+        layout.addWidget(self.toolbar_block("Rate", self.rate_label), 0)
+        layout.addWidget(self.toolbar_divider())
         layout.addWidget(self.toolbar_format_block(), 0)
         layout.addWidget(self.start_button, 0)
         layout.addWidget(self.stop_button, 0)
         layout.addStretch(1)
-        layout.addWidget(self.toolbar_block("Elapsed", self.elapsed_label), 0)
-        layout.addWidget(self.toolbar_block("Rate", self.rate_label), 0)
+        layout.addWidget(self.device_setup_button, 0)
 
         toolbar.setLayout(layout)
         return toolbar
+
+    def toolbar_divider(self):
+        divider = QFrame()
+        divider.setObjectName("toolbarDivider")
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFixedSize(5, 34)
+        return divider
+
+    def create_bottom_bar(self):
+        bar = QFrame()
+        bar.setObjectName("bottomBar")
+        bar.setFixedHeight(42)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(12)
+        layout.addWidget(self.bottom_acquisition_label)
+        layout.addWidget(self.bottom_mode_label, 1)
+        layout.addWidget(self.open_data_folder_button)
+        layout.addWidget(self.view_full_log_button)
+        bar.setLayout(layout)
+        return bar
 
     def toolbar_inline_label(self, text):
         label = QLabel(text)
@@ -313,20 +362,28 @@ class MainWindow(QMainWindow):
     def toolbar_status_block(self):
         block = QFrame()
         block.setObjectName("toolbarBlock")
-        block.setMinimumWidth(360)
-        block.setFixedHeight(58)
+        block.setMinimumWidth(500)
+        block.setFixedHeight(50)
 
         layout = QGridLayout()
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setHorizontalSpacing(10)
+        layout.setContentsMargins(0, 3, 0, 3)
+        layout.setHorizontalSpacing(14)
         layout.setVerticalSpacing(2)
 
         title_label = QLabel("Status")
         title_label.setObjectName("caption")
         layout.addWidget(title_label, 0, 0)
         layout.addWidget(self.status_label, 0, 1)
-        layout.addWidget(self.file_label, 1, 0, 1, 2)
-        layout.setColumnStretch(2, 1)
+        divider = QFrame()
+        divider.setObjectName("toolbarDivider")
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFixedSize(1, 34)
+        layout.addWidget(divider, 0, 2, 2, 1)
+        file_title = QLabel("File")
+        file_title.setObjectName("caption")
+        layout.addWidget(file_title, 0, 3)
+        layout.addWidget(self.file_label, 1, 3)
+        layout.setColumnStretch(3, 1)
 
         block.setLayout(layout)
         return block
@@ -334,12 +391,12 @@ class MainWindow(QMainWindow):
     def toolbar_block(self, title, value_label, detail_label=None):
         block = QFrame()
         block.setObjectName("toolbarBlock")
-        block.setMinimumWidth(125)
-        block.setMaximumWidth(140)
+        block.setMinimumWidth(110)
+        block.setMaximumWidth(130)
         block.setFixedHeight(50)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setContentsMargins(0, 3, 0, 3)
         layout.setSpacing(1)
 
         title_label = QLabel(title)
@@ -356,12 +413,12 @@ class MainWindow(QMainWindow):
         block = QFrame()
         block.setObjectName("toolbarBlock")
         block.setFixedHeight(50)
-        block.setFixedWidth(170)
+        block.setFixedWidth(204)
         layout = QHBoxLayout()
-        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setContentsMargins(0, 5, 0, 5)
         layout.setSpacing(8)
 
-        label = QLabel("Save")
+        label = QLabel("Save as")
         label.setObjectName("caption")
         layout.addWidget(label)
         layout.addWidget(self.format_selector)
@@ -371,41 +428,39 @@ class MainWindow(QMainWindow):
 
     def create_left_panel(self):
         panel = QWidget()
-        panel.setMinimumWidth(305)
-        panel.setMaximumWidth(360)
+        panel.setMinimumWidth(260)
+        panel.setMaximumWidth(285)
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        state_group = self.group("Current State", "blueGroup")
+        readings_layout = QVBoxLayout()
+        readings_layout.setContentsMargins(0, 0, 0, 0)
+        readings_layout.setSpacing(8)
+        readings_layout.addWidget(self.reading_card("Resistance", self.resistance_value_label))
+        readings_layout.addWidget(self.reading_card("Temperature", self.temperature_value_label))
+        readings_layout.addWidget(self.reading_card("NH3 actual", self.nh3_actual_label))
+        readings_layout.addWidget(self.reading_card("Air actual", self.air_actual_label))
+        readings_card = self.section_card(
+            "Current Readings",
+            self.style().standardIcon(QStyle.SP_FileDialogInfoView),
+            readings_layout,
+        )
+
         state_layout = QVBoxLayout()
+        state_layout.setContentsMargins(0, 0, 0, 0)
         state_layout.setSpacing(6)
-        state_layout.addWidget(self.metric_row("NH3 Flow", self.nh3_value_label))
-        state_layout.addWidget(self.metric_row("Air Flow", self.air_value_label))
         state_layout.addWidget(self.metric_row("Humidity", self.humidity_value_label))
         state_layout.addWidget(self.metric_row("Heating", self.heating_value_label))
-        state_group.setLayout(state_layout)
+        state_card = self.section_card(
+            "Current State",
+            self.style().standardIcon(QStyle.SP_DialogApplyButton),
+            state_layout,
+        )
 
-        readings_group = self.group("Live Readings", "purpleGroup")
-        readings_layout = QVBoxLayout()
-        readings_layout.setSpacing(6)
-        readings_layout.addWidget(self.metric_row("Resistance", self.resistance_value_label))
-        readings_layout.addWidget(self.metric_row("Temperature", self.temperature_value_label))
-        readings_layout.addWidget(self.metric_row("NH3 actual", self.nh3_actual_label))
-        readings_layout.addWidget(self.metric_row("Air actual", self.air_actual_label))
-        readings_group.setLayout(readings_layout)
-
-        devices_group = self.group("Devices", "greenGroup")
-        devices_layout = QVBoxLayout()
-        devices_layout.setSpacing(6)
-        devices_layout.addWidget(self.create_multimeter_control())
-        devices_layout.addWidget(self.create_mfc_control())
-        devices_group.setLayout(devices_layout)
-
-        layout.addWidget(state_group)
-        layout.addWidget(readings_group)
-        layout.addWidget(devices_group)
+        layout.addWidget(readings_card)
+        layout.addWidget(state_card)
         layout.addStretch()
         panel.setLayout(layout)
         return panel
@@ -419,24 +474,36 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        resistance_group = self.group("Resistance vs Time", "blueGroup")
         resistance_layout = QVBoxLayout()
-        resistance_layout.setContentsMargins(8, 10, 8, 8)
+        resistance_layout.setContentsMargins(0, 0, 0, 0)
         resistance_layout.addWidget(self.resistance_plot)
-        resistance_group.setLayout(resistance_layout)
+        resistance_card = self.section_card(
+            "Resistance vs Time",
+            self.style().standardIcon(QStyle.SP_DriveHDIcon),
+            resistance_layout,
+            expanding=True,
+        )
 
-        temperature_group = self.group("Temperature vs Time", "orangeGroup")
         temperature_layout = QVBoxLayout()
-        temperature_layout.setContentsMargins(8, 10, 8, 8)
+        temperature_layout.setContentsMargins(0, 0, 0, 0)
         temperature_layout.addWidget(self.temperature_plot)
-        temperature_group.setLayout(temperature_layout)
+        temperature_card = self.section_card(
+            "Temperature vs Time",
+            self.style().standardIcon(QStyle.SP_FileDialogInfoView),
+            temperature_layout,
+            expanding=True,
+        )
 
-        log_group = self.group("Log Preview", "greenGroup")
-        log_group.setMinimumHeight(130)
         log_layout = QVBoxLayout()
-        log_layout.setContentsMargins(8, 10, 8, 8)
+        log_layout.setContentsMargins(0, 0, 0, 0)
         log_layout.addWidget(self.log_table)
-        log_group.setLayout(log_layout)
+        log_card = self.section_card(
+            "Log Preview",
+            self.style().standardIcon(QStyle.SP_FileDialogListView),
+            log_layout,
+            expanding=True,
+        )
+        log_card.setMinimumHeight(130)
 
         center_splitter = QSplitter(Qt.Vertical)
         # Operators can give more space to graphs or to the log preview during
@@ -444,9 +511,9 @@ class MainWindow(QMainWindow):
         center_splitter.setObjectName("centerSplitter")
         center_splitter.setChildrenCollapsible(False)
         center_splitter.setHandleWidth(5)
-        center_splitter.addWidget(resistance_group)
-        center_splitter.addWidget(temperature_group)
-        center_splitter.addWidget(log_group)
+        center_splitter.addWidget(resistance_card)
+        center_splitter.addWidget(temperature_card)
+        center_splitter.addWidget(log_card)
         center_splitter.setStretchFactor(0, 2)
         center_splitter.setStretchFactor(1, 2)
         center_splitter.setStretchFactor(2, 1)
@@ -458,54 +525,113 @@ class MainWindow(QMainWindow):
 
     def create_right_panel(self):
         panel = QWidget()
-        panel.setMinimumWidth(305)
-        panel.setMaximumWidth(360)
+        panel.setMinimumWidth(340)
+        panel.setMaximumWidth(370)
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
-        gas_group = self.group("Gas Controls", "tealGroup")
-        gas_layout = QGridLayout()
-        gas_layout.setContentsMargins(10, 12, 10, 10)
-        gas_layout.setHorizontalSpacing(8)
-        gas_layout.setVerticalSpacing(9)
-        gas_layout.addWidget(QLabel("NH3 flow"), 0, 0)
-        gas_layout.addWidget(self.nh3_control, 0, 1)
-        gas_layout.addWidget(QLabel("NH3 duration"), 1, 0)
-        gas_layout.addWidget(self.nh3_duration, 1, 1)
-        gas_layout.addWidget(self.apply_nh3_button, 2, 0, 1, 2)
-        gas_layout.addWidget(QLabel("Air flow"), 3, 0)
-        gas_layout.addWidget(self.air_control, 3, 1)
-        gas_layout.addWidget(QLabel("Air duration"), 4, 0)
-        gas_layout.addWidget(self.air_duration, 4, 1)
-        gas_layout.addWidget(self.apply_air_button, 5, 0, 1, 2)
-        gas_layout.addWidget(self.air_purge_button, 6, 0, 1, 2)
-        gas_layout.setColumnStretch(1, 1)
-        gas_group.setLayout(gas_layout)
+        manual_layout = QVBoxLayout()
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        manual_layout.setSpacing(6)
+        manual_layout.addWidget(self.manual_mode_label)
+        manual_layout.addWidget(self.control_card(
+            "NH3 Control",
+            "Flow setpoint",
+            self.nh3_control,
+            "Duration",
+            self.nh3_duration,
+            self.apply_nh3_button,
+        ))
+        manual_layout.addWidget(self.control_card(
+            "Air Control",
+            "Flow setpoint",
+            self.air_control,
+            "Duration",
+            self.air_duration,
+            self.apply_air_button,
+            self.air_purge_button,
+        ))
+        manual_card = self.section_card(
+            "Gas Controls",
+            self.style().standardIcon(QStyle.SP_MessageBoxInformation),
+            manual_layout,
+        )
 
-        env_group = self.group("Environment", "yellowGroup")
-        env_layout = QGridLayout()
-        env_layout.setContentsMargins(10, 12, 10, 10)
-        env_layout.setHorizontalSpacing(8)
-        env_layout.setVerticalSpacing(9)
-        env_layout.addWidget(QLabel("Humidity"), 0, 0)
-        env_layout.addWidget(self.humidity_off_button, 0, 1)
-        env_layout.addWidget(self.humidity_on_button, 0, 2)
-        env_layout.addWidget(QLabel("Duration"), 1, 0)
-        env_layout.addWidget(self.humidity_duration, 1, 1, 1, 2)
-        env_layout.addWidget(QLabel("Heating"), 2, 0)
-        env_layout.addWidget(self.heating_off_button, 2, 1)
-        env_layout.addWidget(self.heating_on_button, 2, 2)
-        env_layout.addWidget(QLabel("Duration"), 3, 0)
-        env_layout.addWidget(self.heating_duration, 3, 1, 1, 2)
-        env_group.setLayout(env_layout)
+        environment_layout = QGridLayout()
+        environment_layout.setContentsMargins(0, 0, 0, 0)
+        environment_layout.setHorizontalSpacing(8)
+        environment_layout.setVerticalSpacing(8)
+        environment_layout.addWidget(QLabel("Humidity"), 0, 0)
+        environment_layout.addWidget(self.humidity_off_button, 0, 1)
+        environment_layout.addWidget(self.humidity_on_button, 0, 2)
+        environment_layout.addWidget(QLabel("Duration"), 1, 0)
+        environment_layout.addWidget(self.humidity_duration, 1, 1, 1, 2)
+        environment_layout.addWidget(QLabel("Heating"), 2, 0)
+        environment_layout.addWidget(self.heating_off_button, 2, 1)
+        environment_layout.addWidget(self.heating_on_button, 2, 2)
+        environment_layout.addWidget(QLabel("Duration"), 3, 0)
+        environment_layout.addWidget(self.heating_duration, 3, 1, 1, 2)
+        environment_layout.setColumnStretch(1, 1)
+        environment_layout.setColumnStretch(2, 1)
+        environment_card = self.section_card(
+            "Environment",
+            self.style().standardIcon(QStyle.SP_DialogApplyButton),
+            environment_layout,
+        )
 
-        layout.addWidget(gas_group)
-        layout.addWidget(env_group)
+        devices_layout = QVBoxLayout()
+        devices_layout.setContentsMargins(0, 0, 0, 0)
+        devices_layout.setSpacing(6)
+        devices_layout.addWidget(self.device_status_row("Multimeter", self.multimeter_summary_label))
+        devices_layout.addWidget(self.device_status_row("MFC Controller", self.mfc_summary_label))
+        self.device_setup_container = QFrame()
+        self.device_setup_container.setObjectName("deviceSetupPanel")
+        setup_layout = QVBoxLayout()
+        setup_layout.setContentsMargins(0, 0, 0, 0)
+        setup_layout.setSpacing(6)
+        setup_layout.addWidget(self.create_multimeter_control())
+        setup_layout.addWidget(self.create_mfc_control())
+        self.device_setup_container.setLayout(setup_layout)
+        self.device_setup_container.setVisible(False)
+        devices_layout.addWidget(self.device_setup_container)
+        devices_card = self.section_card(
+            "Device Status",
+            self.style().standardIcon(QStyle.SP_ComputerIcon),
+            devices_layout,
+        )
+
+        layout.addWidget(manual_card)
+        layout.addWidget(environment_card)
+        layout.addWidget(devices_card)
         layout.addStretch()
         panel.setLayout(layout)
         return panel
+
+    def control_card(self, title, first_label, first_widget, second_label, second_widget, action_button, extra_button=None):
+        card = QFrame()
+        card.setObjectName("controlCard")
+
+        layout = QGridLayout()
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setHorizontalSpacing(7)
+        layout.setVerticalSpacing(5)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionLabel")
+        layout.addWidget(title_label, 0, 0, 1, 2)
+        layout.addWidget(QLabel(first_label), 1, 0)
+        layout.addWidget(first_widget, 1, 1)
+        layout.addWidget(QLabel(second_label), 2, 0)
+        layout.addWidget(second_widget, 2, 1)
+        layout.addWidget(action_button, 3, 0, 1, 2)
+        if extra_button is not None:
+            layout.addWidget(extra_button, 4, 0, 1, 2)
+        layout.setColumnStretch(1, 1)
+
+        card.setLayout(layout)
+        return card
 
     def scroll_panel(self, widget):
         area = QScrollArea()
@@ -520,11 +646,35 @@ class MainWindow(QMainWindow):
         area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         return area
 
-    def group(self, title, object_name):
-        group = QGroupBox(title)
-        group.setObjectName(object_name)
-        group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        return group
+    def section_card(self, title, icon, content_layout, expanding=False):
+        card = QFrame()
+        card.setObjectName("sectionCard")
+        vertical_policy = QSizePolicy.Expanding if expanding else QSizePolicy.Preferred
+        card.setSizePolicy(QSizePolicy.Preferred, vertical_policy)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+
+        icon_label = QLabel()
+        icon_label.setObjectName("sectionIcon")
+        icon_label.setPixmap(icon.pixmap(16, 16))
+
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionTitle")
+
+        header.addWidget(icon_label)
+        header.addWidget(title_label)
+        header.addStretch()
+
+        layout.addLayout(header)
+        layout.addLayout(content_layout, 1)
+        card.setLayout(layout)
+        return card
 
     def metric_value(self, text):
         label = QLabel(text)
@@ -550,6 +700,44 @@ class MainWindow(QMainWindow):
         row.setLayout(layout)
         return row
 
+    def reading_card(self, name, value_label):
+        card = QFrame()
+        card.setObjectName("readingCard")
+        card.setMinimumHeight(72)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
+        name_label = QLabel(name)
+        name_label.setObjectName("metricName")
+        icon_label = QLabel()
+        icon_label.setObjectName("readingIcon")
+        icon_label.setPixmap(self.reading_icon(name).pixmap(18, 18))
+        header_layout.addWidget(name_label)
+        header_layout.addStretch()
+        header_layout.addWidget(icon_label)
+
+        value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addLayout(header_layout)
+        layout.addWidget(value_label)
+        layout.addStretch()
+
+        card.setLayout(layout)
+        return card
+
+    def reading_icon(self, name):
+        if name == "Resistance":
+            return self.style().standardIcon(QStyle.SP_ComputerIcon)
+        if name == "Temperature":
+            return self.style().standardIcon(QStyle.SP_FileDialogInfoView)
+        if "NH3" in name:
+            return self.style().standardIcon(QStyle.SP_BrowserReload)
+        return self.style().standardIcon(QStyle.SP_DriveNetIcon)
+
     def device_row(self, name, status):
         row = QFrame()
         row.setObjectName("deviceRow")
@@ -564,6 +752,31 @@ class MainWindow(QMainWindow):
 
         row.setLayout(layout)
         return row
+
+    def device_status_row(self, name, status_label):
+        row = QFrame()
+        row.setObjectName("deviceStatusRow")
+        layout = QHBoxLayout()
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(8)
+
+        name_label = QLabel(name)
+        name_label.setObjectName("sectionLabel")
+        layout.addWidget(name_label)
+        layout.addStretch()
+        layout.addWidget(status_label)
+
+        row.setLayout(layout)
+        return row
+
+    def toggle_device_setup(self, _checked=False):
+        if not hasattr(self, "device_setup_container"):
+            return
+
+        visible = not self.device_setup_container.isVisible()
+        self.device_setup_container.setVisible(visible)
+        if visible:
+            self.mfc_mode_selector.setFocus(Qt.OtherFocusReason)
 
     def create_multimeter_control(self):
         row = QFrame()
@@ -682,6 +895,16 @@ class MainWindow(QMainWindow):
             self.data_directory,
         )
 
+    def open_data_folder(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.data_directory))
+
+    def open_current_log(self):
+        if not self.current_file_path:
+            self.file_label.setText("No experiment file to open yet")
+            return
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.current_file_path))
+
     def confirm_new_experiment(self):
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Question)
@@ -725,6 +948,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("RUNNING")
         self.set_status_badge_state("running")
         self.file_label.setText(filename)
+        self.bottom_acquisition_label.setText("Acquisition running")
 
     def on_experiment_stopped(self, message):
         self.completed_experiment_exists = True
@@ -733,11 +957,13 @@ class MainWindow(QMainWindow):
         self.set_status_badge_state("stopped")
         self.reset_duration_controls()
         self.file_label.setText(message)
+        self.bottom_acquisition_label.setText("Acquisition stopped")
 
     def on_device_error(self, message):
         self.status_label.setText("ERROR")
         self.set_status_badge_state("error")
         self.file_label.setText(message)
+        self.bottom_acquisition_label.setText("Acquisition error")
 
     def set_status_badge_state(self, state):
         self.status_label.setProperty("state", state)
@@ -829,9 +1055,11 @@ class MainWindow(QMainWindow):
     def on_multimeter_changed(self, mode, status):
         if mode == "real":
             self.multimeter_status_label.setText("Connected: real multimeter")
+            self.multimeter_summary_label.setText("real")
             self.multimeter_status_label.setToolTip(status)
         else:
             self.multimeter_status_label.setText("Connected: simulated")
+            self.multimeter_summary_label.setText("simulated")
             self.multimeter_status_label.setToolTip(status)
 
     def on_mfc_mode_changed(self, text):
@@ -845,10 +1073,20 @@ class MainWindow(QMainWindow):
             self.mfc_note_label.setText(
                 "Flow writes disabled."
             )
+            self.manual_mode_label.setText(
+                "Real MFC mode (read-only) - flow control is disabled"
+            )
+            self.bottom_mode_label.setText(
+                "Read-only mode: MFC readings are allowed, flow control is disabled"
+            )
         else:
             self.mfc_note_label.setText(
                 "Simulated MFC: gas controls affect only the software model."
             )
+            self.manual_mode_label.setText(
+                "Simulated MFC mode - software model only"
+            )
+            self.bottom_mode_label.setText("Simulation mode ready")
 
     def scan_mfc_ports(self):
         self.mfc_port_selector.clear()
@@ -892,10 +1130,12 @@ class MainWindow(QMainWindow):
     def on_mfc_changed(self, mode, status):
         if mode == "real":
             self.mfc_status_label.setText(self.compact_mfc_status(status))
+            self.mfc_summary_label.setText("real read-only")
             self.mfc_status_label.setToolTip(status)
             self.set_mfc_write_controls_enabled(False)
         else:
             self.mfc_status_label.setText("Connected: simulated")
+            self.mfc_summary_label.setText("simulated")
             self.mfc_status_label.setToolTip(status)
             self.set_mfc_write_controls_enabled(True)
 
@@ -1075,12 +1315,23 @@ class MainWindow(QMainWindow):
     def apply_styles(self):
         self.setStyleSheet("""
             QWidget#appBackground {
-                background: #f3f6fa;
+                background: #f6f8fb;
             }
             QFrame#toolbar {
                 background: #ffffff;
                 border: 1px solid #dce5ef;
-                border-radius: 0;
+                border-radius: 8px;
+            }
+            QFrame#toolbarDivider {
+                background: #e5eaf0;
+                border: none;
+                min-width: 1px;
+                max-width: 1px;
+            }
+            QFrame#bottomBar {
+                background: #ffffff;
+                border: 1px solid #dce5ef;
+                border-radius: 7px;
             }
             QSplitter#bodySplitter::handle {
                 background: #d7e0eb;
@@ -1107,30 +1358,32 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-radius: 0;
             }
-            QGroupBox {
+            QFrame#sectionCard {
                 background: #ffffff;
-                border: 1px solid #cfd8e3;
-                border-radius: 0;
-                margin-top: 22px;
-                padding: 8px;
-                font-weight: 700;
-                color: #102033;
+                border: 1px solid #dce5ef;
+                border-radius: 8px;
             }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 10px;
-                top: 0px;
-                padding: 0 8px 2px 8px;
-                background: #f3f6fa;
+            QLabel#sectionTitle {
                 color: #0f172a;
-                font-size: 12px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QLabel#sectionIcon {
+                min-width: 16px;
+                max-width: 16px;
             }
             QFrame#metricRow,
-            QFrame#deviceRow {
-                background: #f8fafc;
+            QFrame#deviceRow,
+            QFrame#deviceStatusRow,
+            QFrame#readingCard,
+            QFrame#controlCard {
+                background: #fbfcfe;
                 border: 1px solid #e2e8f0;
-                border-radius: 0;
+                border-radius: 7px;
+            }
+            QFrame#deviceSetupPanel {
+                background: transparent;
+                border: none;
             }
             QFrame#metricRow {
                 min-height: 34px;
@@ -1144,7 +1397,7 @@ class MainWindow(QMainWindow):
             QLabel#metricName,
             QLabel#mutedLabel {
                 color: #64748b;
-                font-size: 11px;
+                font-size: 12px;
                 font-weight: 500;
             }
             QLabel#toolbarSectionLabel {
@@ -1161,34 +1414,45 @@ class MainWindow(QMainWindow):
             QLabel#warningLabel {
                 background: #fffbeb;
                 border: 1px solid #facc15;
-                border-radius: 6px;
+                border-radius: 7px;
                 color: #92400e;
-                padding: 7px 8px;
-                font-size: 12px;
+                padding: 5px 8px;
+                font-size: 11px;
                 font-weight: 600;
             }
             QLabel#metricValue,
             QLabel#toolbarValue {
                 color: #0f172a;
-                font-size: 15px;
+                font-size: 16px;
                 font-weight: 700;
             }
-            QLabel#metricValue[metricColor="blue"],
-            QLabel#metricValue[metricColor="orange"],
-            QLabel#metricValue[metricColor="purple"],
+            QLabel#metricValue[metricColor="blue"] {
+                color: #2563eb;
+                font-size: 20px;
+            }
+            QLabel#metricValue[metricColor="orange"] {
+                color: #f97316;
+                font-size: 20px;
+            }
+            QLabel#metricValue[metricColor="purple"] {
+                color: #7c3aed;
+                font-size: 20px;
+            }
             QLabel#metricValue[metricColor="teal"] {
-                color: #0f172a;
+                color: #0f9f9a;
+                font-size: 20px;
             }
             QLabel#statusBadge {
                 background: #dcfce7;
                 color: #15803d;
-                border-radius: 12px;
+                border: 1px solid #86efac;
+                border-radius: 6px;
                 padding: 3px 8px;
                 font-weight: 700;
             }
             QLabel#statusBadge[state="running"] {
-                background: #dbeafe;
-                color: #1d4ed8;
+                background: #dcfce7;
+                color: #15803d;
             }
             QLabel#statusBadge[state="error"] {
                 background: #fee2e2;
@@ -1202,6 +1466,9 @@ class MainWindow(QMainWindow):
                 color: #16a34a;
                 font-size: 11px;
                 font-weight: 600;
+            }
+            QLabel#readingIcon {
+                color: #64748b;
             }
             QScrollBar:vertical {
                 background: transparent;
@@ -1229,7 +1496,7 @@ class MainWindow(QMainWindow):
             QSpinBox,
             QLineEdit {
                 border: 1px solid #cbd5e1;
-                border-radius: 2px;
+                border-radius: 6px;
                 padding: 2px 7px;
                 background: #ffffff;
                 color: #172033;
@@ -1263,10 +1530,10 @@ class MainWindow(QMainWindow):
                 height: 12px;
             }
             QPushButton {
-                min-height: 28px;
+                min-height: 24px;
                 border: 1px solid #cbd5e1;
-                border-radius: 5px;
-                padding: 4px 8px;
+                border-radius: 6px;
+                padding: 4px 10px;
                 background: #ffffff;
                 color: #172033;
             }
@@ -1275,21 +1542,11 @@ class MainWindow(QMainWindow):
                 border-color: #94a3b8;
             }
             QPushButton#stepButton {
-                min-height: 26px;
+                min-height: 24px;
                 border-radius: 5px;
                 padding: 0;
                 font-size: 14px;
                 font-weight: 700;
-            }
-            QGroupBox#greenGroup QComboBox,
-            QGroupBox#greenGroup QLineEdit {
-                min-height: 24px;
-                font-size: 11px;
-            }
-            QGroupBox#greenGroup QPushButton {
-                min-height: 24px;
-                padding: 2px 5px;
-                font-size: 11px;
             }
             QPushButton#startButton,
             QPushButton#primaryButton {
@@ -1315,14 +1572,14 @@ class MainWindow(QMainWindow):
             }
             QPushButton:disabled {
                 color: #9ca3af;
-                background: #f1f5f9;
+                background: #eef2f7;
                 border-color: #e5e7eb;
             }
             QTableWidget {
                 background: #ffffff;
                 alternate-background-color: #f8fafc;
                 border: 1px solid #e2e8f0;
-                border-radius: 2px;
+                border-radius: 6px;
                 gridline-color: #e2e8f0;
                 color: #102033;
                 selection-background-color: #dbeafe;
