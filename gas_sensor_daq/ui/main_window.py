@@ -1,8 +1,8 @@
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap, QPolygon, QTransform
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListView,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -82,14 +83,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Gas Sensor DAQ & MFC Control")
         self.setWindowIcon(QIcon(str(self.assets_dir / "microchip.png")))
 
-        self.setMinimumSize(960, 600)
+        self.setMinimumSize(1280, 720)
 
         self.manager = AcquisitionManager(self)
         self.time_data = []
         self.resistance_data = []
         self.temperature_data = []
         self.completed_experiment_exists = False
-        self.max_log_preview_rows = 50
+        self.max_log_preview_rows = 5
+        self.adjusting_log_columns = False
         self.data_directory = self.manager.data_directory
         self.current_file_path = ""
 
@@ -112,26 +114,44 @@ class MainWindow(QMainWindow):
 
         self.format_selector = QComboBox()
         self.format_selector.addItems(["CSV", "Excel"])
-        self.format_selector.setFixedWidth(128)
-        self.format_selector.setFixedHeight(40)
-        self.device_setup_button = QPushButton("Device Setup")
-        self.device_setup_button.setIcon(QIcon(str(self.assets_dir / "setting.png")))
-        self.device_setup_button.setIconSize(QSize(18, 18))
-        self.device_setup_button.setFixedSize(136, 40)
-        self.device_setup_button.clicked.connect(self.toggle_device_setup)
-        self.open_data_folder_button = QPushButton("Open Data Folder")
-        self.open_data_folder_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        self.format_selector.setFixedWidth(100)
+        self.format_selector.setFixedHeight(34)
+        self.log_rows_selector = QComboBox()
+        self.log_rows_selector.setObjectName("logRowsSelector")
+        self.log_rows_selector.addItems(["5", "10", "25", "50"])
+        self.log_rows_selector.setFixedWidth(52)
+        self.log_rows_selector.setFixedHeight(26)
+        self.log_rows_selector.setView(QListView())
+        self.log_rows_selector.view().setObjectName("logRowsPopup")
+        self.log_rows_selector.currentTextChanged.connect(self.on_log_rows_changed)
+        self.open_data_folder_button = QPushButton("Open Folder")
+        self.open_data_folder_button.setObjectName("logActionButton")
         self.open_data_folder_button.clicked.connect(self.open_data_folder)
-        self.view_full_log_button = QPushButton("View Full Log")
-        self.view_full_log_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogListView))
+        self.view_full_log_button = QPushButton("Full Log")
+        self.view_full_log_button.setObjectName("logActionButton")
         self.view_full_log_button.clicked.connect(self.open_current_log)
+        self.view_full_log_button.setEnabled(False)
         self.bottom_acquisition_label = QLabel("Acquisition idle")
         self.bottom_acquisition_label.setObjectName("statusLineLabel")
         self.bottom_mode_label = QLabel("Simulation mode ready")
         self.bottom_mode_label.setObjectName("mutedLabel")
+        self.manual_mode_frame = QFrame()
+        self.manual_mode_frame.setObjectName("warningFrame")
+        manual_mode_layout = QHBoxLayout()
+        manual_mode_layout.setContentsMargins(9, 8, 9, 8)
+        manual_mode_layout.setSpacing(8)
+        self.manual_mode_icon = QLabel()
+        self.manual_mode_icon.setObjectName("warningIcon")
+        self.manual_mode_icon.setPixmap(QPixmap(str(self.assets_dir / "locker.png")).scaled(
+            16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
+        self.manual_mode_icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         self.manual_mode_label = QLabel("Simulated MFC mode")
         self.manual_mode_label.setObjectName("warningLabel")
         self.manual_mode_label.setWordWrap(True)
+        manual_mode_layout.addWidget(self.manual_mode_icon, 0, Qt.AlignTop)
+        manual_mode_layout.addWidget(self.manual_mode_label, 1)
+        self.manual_mode_frame.setLayout(manual_mode_layout)
         self.multimeter_mode_selector = QComboBox()
         self.multimeter_mode_selector.addItems(["Simulated", "Real multimeter"])
         self.visa_device_selector = QComboBox()
@@ -149,7 +169,7 @@ class MainWindow(QMainWindow):
         self.multimeter_status_label.setObjectName("connectedLabel")
         self.multimeter_status_label.setWordWrap(True)
         self.multimeter_status_label.setMaximumHeight(34)
-        self.mfc_status_label = QLabel("Connected: simulated")
+        self.mfc_status_label = QLabel("Connected: Simulated")
         self.mfc_status_label.setObjectName("connectedLabel")
         self.mfc_status_label.setWordWrap(True)
         self.mfc_status_label.setMaximumHeight(40)
@@ -157,9 +177,9 @@ class MainWindow(QMainWindow):
         self.mfc_note_label.setObjectName("mutedLabel")
         self.mfc_note_label.setWordWrap(True)
         self.mfc_note_label.setMaximumHeight(28)
-        self.multimeter_summary_label = QLabel("simulated")
+        self.multimeter_summary_label = QLabel("Simulated")
         self.multimeter_summary_label.setObjectName("connectedLabel")
-        self.mfc_summary_label = QLabel("simulated")
+        self.mfc_summary_label = QLabel("Simulated")
         self.mfc_summary_label.setObjectName("connectedLabel")
         self.mfc_mode_selector = QComboBox()
         self.mfc_mode_selector.addItems(["Simulated", "Real MFC"])
@@ -170,15 +190,15 @@ class MainWindow(QMainWindow):
         self.scan_mfc_button.setFixedWidth(52)
         self.connect_mfc_button.setFixedWidth(68)
 
-        self.start_button = QPushButton("Start")
-        self.stop_button = QPushButton("Stop")
-        self.start_button.setFixedSize(88, 40)
-        self.stop_button.setFixedSize(88, 40)
+        self.start_button = QPushButton("  Start")
+        self.stop_button = QPushButton("  Stop")
+        self.start_button.setFixedSize(78, 32)
+        self.stop_button.setFixedSize(78, 32)
         self.start_button.setObjectName("startButton")
         self.stop_button.setObjectName("stopButton")
-        self.start_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        self.stop_button.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
-        self.start_button.setIconSize(QSize(16, 16))
+        self.start_button.setIcon(self.create_play_icon(QColor("#15803d")))
+        self.stop_button.setIcon(self.create_stop_icon(QColor("#dc2626")))
+        self.start_button.setIconSize(QSize(20, 20))
         self.stop_button.setIconSize(QSize(16, 16))
         self.start_button.clicked.connect(self.start_experiment)
         self.stop_button.clicked.connect(
@@ -198,6 +218,15 @@ class MainWindow(QMainWindow):
         self.temperature_value_label.setProperty("metricColor", "orange")
         self.nh3_actual_label.setProperty("metricColor", "purple")
         self.air_actual_label.setProperty("metricColor", "teal")
+        for value_label in (
+            self.resistance_value_label,
+            self.temperature_value_label,
+            self.nh3_actual_label,
+            self.air_actual_label,
+            self.humidity_value_label,
+            self.heating_value_label,
+        ):
+            value_label.setProperty("compactMetric", "true")
 
         self.nh3_control = Stepper(0, 100, 0, " sccm")
         self.air_control = Stepper(0, 500, 100, " sccm")
@@ -205,17 +234,30 @@ class MainWindow(QMainWindow):
         self.air_duration = Stepper(0, 24 * 60 * 60, 0, " s")
         self.humidity_duration = Stepper(0, 24 * 60 * 60, 0, " s")
         self.heating_duration = Stepper(0, 24 * 60 * 60, 0, " s")
+        self.environment_countdowns = {}
 
-        self.apply_nh3_button = QPushButton("Apply NH3")
-        self.apply_air_button = QPushButton("Apply Air")
+        self.apply_nh3_button = QPushButton("Apply")
+        self.apply_air_button = QPushButton("Apply")
         self.air_purge_button = QPushButton("Air Purge")
-        self.humidity_on_button = QPushButton("Humidity ON")
-        self.humidity_off_button = QPushButton("Humidity OFF")
-        self.heating_on_button = QPushButton("Heating ON")
-        self.heating_off_button = QPushButton("Heating OFF")
+        self.humidity_on_button = QPushButton("ON")
+        self.humidity_off_button = QPushButton("OFF")
+        self.heating_on_button = QPushButton("ON")
+        self.heating_off_button = QPushButton("OFF")
+        self.humidity_status_label = QLabel("OFF")
+        self.heating_status_label = QLabel("OFF")
+        self.humidity_status_label.setObjectName("envStatus")
+        self.heating_status_label.setObjectName("envStatus")
 
         self.apply_nh3_button.setObjectName("primaryButton")
         self.apply_air_button.setObjectName("primaryButton")
+        self.air_purge_button.setObjectName("secondaryButton")
+        for button in (
+            self.humidity_on_button,
+            self.humidity_off_button,
+            self.heating_on_button,
+            self.heating_off_button,
+        ):
+            button.setObjectName("toggleButton")
 
         self.apply_nh3_button.clicked.connect(self.apply_nh3)
         self.apply_air_button.clicked.connect(self.apply_air)
@@ -232,6 +274,7 @@ class MainWindow(QMainWindow):
         self.heating_off_button.clicked.connect(
             lambda _checked=False: self.set_heating(False)
         )
+        self.setup_environment_countdowns()
         self.scan_visa_button.clicked.connect(self.scan_visa_devices)
         self.connect_multimeter_button.clicked.connect(self.connect_multimeter)
         self.multimeter_mode_selector.currentTextChanged.connect(self.on_multimeter_mode_changed)
@@ -253,21 +296,21 @@ class MainWindow(QMainWindow):
         self.temperature_plot = self.create_plot(
             "Temperature vs Time",
             "Temperature",
-            "deg C",
-            "#dc2626",
+            "°C",
+            "#f97316",
         )
         self.temperature_curve = self.temperature_plot.plot(
-            pen=pg.mkPen(color="#dc2626", width=2)
+            pen=pg.mkPen(color="#f97316", width=2)
         )
 
         self.log_table = QTableWidget(0, 7)
         self.log_table.setHorizontalHeaderLabels([
             "Time",
-            "Elapsed",
-            "Resistance",
-            "Temp",
-            "NH3",
-            "Air",
+            "Elapsed (s)",
+            "Resistance (Ohm)",
+            "Temperature (°C)",
+            "Analyte (sccm)",
+            "Air (sccm)",
             "Event",
         ])
         self.configure_log_table()
@@ -288,7 +331,6 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.scroll_panel(self.create_right_panel()), 0)
 
         root_layout.addLayout(body_layout, 1)
-        root_layout.addWidget(self.create_bottom_bar())
         root.setLayout(root_layout)
         self.setCentralWidget(root)
 
@@ -316,6 +358,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(14)
 
         layout.addWidget(self.toolbar_status_block(), 1)
+        layout.addStretch(1)
         layout.addWidget(self.toolbar_divider())
         layout.addWidget(self.toolbar_block("Elapsed", self.elapsed_label), 0)
         layout.addWidget(self.toolbar_divider())
@@ -324,8 +367,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.toolbar_format_block(), 0)
         layout.addWidget(self.start_button, 0)
         layout.addWidget(self.stop_button, 0)
-        layout.addStretch(1)
-        layout.addWidget(self.device_setup_button, 0)
 
         toolbar.setLayout(layout)
         return toolbar
@@ -336,6 +377,39 @@ class MainWindow(QMainWindow):
         divider.setFrameShape(QFrame.VLine)
         divider.setFixedSize(5, 34)
         return divider
+
+    def create_play_icon(self, color):
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(QPolygon([QPoint(7, 4), QPoint(17, 11), QPoint(7, 18)]))
+        painter.end()
+        return QIcon(pixmap)
+
+    def create_stop_icon(self, color):
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(5, 5, 10, 10, 1, 1)
+        painter.end()
+        return QIcon(pixmap)
+
+    def chevron_icon(self, expanded):
+        pixmap = QPixmap(str(self.assets_dir / "chevron_down.svg"))
+        if not expanded:
+            pixmap = pixmap.transformed(
+                QTransform().rotate(-90),
+                Qt.SmoothTransformation,
+            )
+        return QIcon(pixmap)
 
     def create_bottom_bar(self):
         bar = QFrame()
@@ -370,10 +444,16 @@ class MainWindow(QMainWindow):
         layout.setHorizontalSpacing(14)
         layout.setVerticalSpacing(2)
 
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(12)
         title_label = QLabel("Status")
         title_label.setObjectName("caption")
-        layout.addWidget(title_label, 0, 0)
-        layout.addWidget(self.status_label, 0, 1)
+        title_label.setAlignment(Qt.AlignVCenter)
+        status_row.addWidget(title_label)
+        status_row.addWidget(self.status_label)
+        status_row.addStretch()
+        layout.addLayout(status_row, 0, 0, 2, 2)
         divider = QFrame()
         divider.setObjectName("toolbarDivider")
         divider.setFrameShape(QFrame.VLine)
@@ -413,7 +493,7 @@ class MainWindow(QMainWindow):
         block = QFrame()
         block.setObjectName("toolbarBlock")
         block.setFixedHeight(50)
-        block.setFixedWidth(204)
+        block.setFixedWidth(172)
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 5, 0, 5)
         layout.setSpacing(8)
@@ -437,25 +517,23 @@ class MainWindow(QMainWindow):
 
         readings_layout = QVBoxLayout()
         readings_layout.setContentsMargins(0, 0, 0, 0)
-        readings_layout.setSpacing(8)
-        readings_layout.addWidget(self.reading_card("Resistance", self.resistance_value_label))
-        readings_layout.addWidget(self.reading_card("Temperature", self.temperature_value_label))
-        readings_layout.addWidget(self.reading_card("NH3 actual", self.nh3_actual_label))
-        readings_layout.addWidget(self.reading_card("Air actual", self.air_actual_label))
-        readings_card = self.section_card(
+        readings_layout.setSpacing(0)
+        readings_layout.addWidget(self.reading_row("Resistance", self.resistance_value_label, "#2563eb"))
+        readings_layout.addWidget(self.reading_row("Temperature", self.temperature_value_label, "#f97316"))
+        readings_layout.addWidget(self.reading_row("Analyte flow", self.nh3_actual_label, "#7c3aed"))
+        readings_layout.addWidget(self.reading_row("Air flow", self.air_actual_label, "#0f9f9a"))
+        readings_card = self.compact_section_card(
             "Current Readings",
-            self.style().standardIcon(QStyle.SP_FileDialogInfoView),
             readings_layout,
         )
 
         state_layout = QVBoxLayout()
         state_layout.setContentsMargins(0, 0, 0, 0)
-        state_layout.setSpacing(6)
-        state_layout.addWidget(self.metric_row("Humidity", self.humidity_value_label))
-        state_layout.addWidget(self.metric_row("Heating", self.heating_value_label))
-        state_card = self.section_card(
+        state_layout.setSpacing(0)
+        state_layout.addWidget(self.state_row("Humidity", self.humidity_value_label))
+        state_layout.addWidget(self.state_row("Heating", self.heating_value_label))
+        state_card = self.compact_section_card(
             "Current State",
-            self.style().standardIcon(QStyle.SP_DialogApplyButton),
             state_layout,
         )
 
@@ -472,54 +550,40 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(6)
 
         resistance_layout = QVBoxLayout()
         resistance_layout.setContentsMargins(0, 0, 0, 0)
         resistance_layout.addWidget(self.resistance_plot)
-        resistance_card = self.section_card(
+        resistance_card = self.graph_card(
             "Resistance vs Time",
-            self.style().standardIcon(QStyle.SP_DriveHDIcon),
+            "#3b82f6",
             resistance_layout,
-            expanding=True,
         )
 
         temperature_layout = QVBoxLayout()
         temperature_layout.setContentsMargins(0, 0, 0, 0)
         temperature_layout.addWidget(self.temperature_plot)
-        temperature_card = self.section_card(
+        temperature_card = self.graph_card(
             "Temperature vs Time",
-            self.style().standardIcon(QStyle.SP_FileDialogInfoView),
+            "#f97316",
             temperature_layout,
-            expanding=True,
         )
 
         log_layout = QVBoxLayout()
-        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setContentsMargins(0, 0, 0, 10)
         log_layout.addWidget(self.log_table)
-        log_card = self.section_card(
+        log_card = self.log_card(
             "Log Preview",
-            self.style().standardIcon(QStyle.SP_FileDialogListView),
             log_layout,
-            expanding=True,
         )
-        log_card.setMinimumHeight(130)
+        self.log_card_widget = log_card
+        log_card.setMinimumHeight(235)
+        self.update_log_preview_height()
 
-        center_splitter = QSplitter(Qt.Vertical)
-        # Operators can give more space to graphs or to the log preview during
-        # long runs without changing the acquisition logic.
-        center_splitter.setObjectName("centerSplitter")
-        center_splitter.setChildrenCollapsible(False)
-        center_splitter.setHandleWidth(5)
-        center_splitter.addWidget(resistance_card)
-        center_splitter.addWidget(temperature_card)
-        center_splitter.addWidget(log_card)
-        center_splitter.setStretchFactor(0, 2)
-        center_splitter.setStretchFactor(1, 2)
-        center_splitter.setStretchFactor(2, 1)
-        center_splitter.setSizes([260, 260, 180])
-
-        layout.addWidget(center_splitter, 1)
+        layout.addWidget(resistance_card, 2)
+        layout.addWidget(temperature_card, 2)
+        layout.addWidget(log_card, 2)
         panel.setLayout(layout)
         return panel
 
@@ -535,71 +599,67 @@ class MainWindow(QMainWindow):
         manual_layout = QVBoxLayout()
         manual_layout.setContentsMargins(0, 0, 0, 0)
         manual_layout.setSpacing(6)
-        manual_layout.addWidget(self.manual_mode_label)
-        manual_layout.addWidget(self.control_card(
-            "NH3 Control",
-            "Flow setpoint",
+        manual_layout.addWidget(self.manual_mode_frame)
+        manual_layout.addWidget(self.gas_channel_row(
+            "Analyte",
+            "#7c3aed",
             self.nh3_control,
-            "Duration",
             self.nh3_duration,
             self.apply_nh3_button,
         ))
-        manual_layout.addWidget(self.control_card(
-            "Air Control",
-            "Flow setpoint",
+        manual_layout.addWidget(self.gas_channel_row(
+            "Air",
+            "#0f9f9a",
             self.air_control,
-            "Duration",
             self.air_duration,
             self.apply_air_button,
-            self.air_purge_button,
         ))
-        manual_card = self.section_card(
+        manual_layout.addWidget(self.air_purge_button)
+        manual_card = self.compact_section_card(
             "Gas Controls",
-            self.style().standardIcon(QStyle.SP_MessageBoxInformation),
             manual_layout,
         )
 
-        environment_layout = QGridLayout()
+        environment_layout = QVBoxLayout()
         environment_layout.setContentsMargins(0, 0, 0, 0)
-        environment_layout.setHorizontalSpacing(8)
-        environment_layout.setVerticalSpacing(8)
-        environment_layout.addWidget(QLabel("Humidity"), 0, 0)
-        environment_layout.addWidget(self.humidity_off_button, 0, 1)
-        environment_layout.addWidget(self.humidity_on_button, 0, 2)
-        environment_layout.addWidget(QLabel("Duration"), 1, 0)
-        environment_layout.addWidget(self.humidity_duration, 1, 1, 1, 2)
-        environment_layout.addWidget(QLabel("Heating"), 2, 0)
-        environment_layout.addWidget(self.heating_off_button, 2, 1)
-        environment_layout.addWidget(self.heating_on_button, 2, 2)
-        environment_layout.addWidget(QLabel("Duration"), 3, 0)
-        environment_layout.addWidget(self.heating_duration, 3, 1, 1, 2)
-        environment_layout.setColumnStretch(1, 1)
-        environment_layout.setColumnStretch(2, 1)
-        environment_card = self.section_card(
+        environment_layout.setSpacing(6)
+        environment_layout.addWidget(self.environment_control_row(
+            "Humidity",
+            self.humidity_status_label,
+            self.humidity_off_button,
+            self.humidity_on_button,
+            self.humidity_duration,
+        ))
+        environment_layout.addWidget(self.environment_control_row(
+            "Heating",
+            self.heating_status_label,
+            self.heating_off_button,
+            self.heating_on_button,
+            self.heating_duration,
+        ))
+        environment_card = self.compact_section_card(
             "Environment",
-            self.style().standardIcon(QStyle.SP_DialogApplyButton),
             environment_layout,
         )
 
         devices_layout = QVBoxLayout()
         devices_layout.setContentsMargins(0, 0, 0, 0)
         devices_layout.setSpacing(6)
-        devices_layout.addWidget(self.device_status_row("Multimeter", self.multimeter_summary_label))
-        devices_layout.addWidget(self.device_status_row("MFC Controller", self.mfc_summary_label))
-        self.device_setup_container = QFrame()
-        self.device_setup_container.setObjectName("deviceSetupPanel")
-        setup_layout = QVBoxLayout()
-        setup_layout.setContentsMargins(0, 0, 0, 0)
-        setup_layout.setSpacing(6)
-        setup_layout.addWidget(self.create_multimeter_control())
-        setup_layout.addWidget(self.create_mfc_control())
-        self.device_setup_container.setLayout(setup_layout)
-        self.device_setup_container.setVisible(False)
-        devices_layout.addWidget(self.device_setup_container)
+        devices_layout.addWidget(self.create_multimeter_control())
+        devices_layout.addWidget(self.create_mfc_control())
+        self.device_status_chevron = QPushButton()
+        self.device_status_chevron.setObjectName("sectionChevron")
+        self.device_status_chevron.setFixedSize(24, 22)
+        self.device_status_chevron.setIcon(self.chevron_icon(expanded=False))
+        self.device_status_chevron.setIconSize(QSize(12, 12))
+        self.device_status_chevron.setCheckable(True)
+        self.device_status_chevron.setChecked(False)
+        self.device_status_chevron.clicked.connect(self.toggle_device_setup)
         devices_card = self.section_card(
             "Device Status",
-            self.style().standardIcon(QStyle.SP_ComputerIcon),
+            None,
             devices_layout,
+            header_widget=self.device_status_chevron,
         )
 
         layout.addWidget(manual_card)
@@ -608,6 +668,78 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         panel.setLayout(layout)
         return panel
+
+    def gas_channel_row(self, title, color, flow_widget, duration_widget, action_button):
+        row = QFrame()
+        row.setObjectName("gasChannelRow")
+
+        layout = QGridLayout()
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+
+        dot = QLabel()
+        dot.setObjectName("compactDot")
+        dot.setStyleSheet(f"background: {color}; border-radius: 3px;")
+        dot.setFixedSize(6, 6)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionLabel")
+
+        title_layout = QHBoxLayout()
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(7)
+        title_layout.addWidget(dot)
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+
+        flow_label = QLabel("Flow")
+        flow_label.setObjectName("metricName")
+        duration_label = QLabel("Duration")
+        duration_label.setObjectName("metricName")
+
+        action_button.setFixedWidth(78)
+
+        layout.addLayout(title_layout, 0, 0, 1, 2)
+        layout.addWidget(flow_label, 1, 0)
+        layout.addWidget(flow_widget, 1, 1)
+        layout.addWidget(duration_label, 2, 0)
+        layout.addWidget(duration_widget, 2, 1)
+        layout.addWidget(action_button, 1, 2, 2, 1)
+        layout.setColumnStretch(1, 1)
+
+        row.setLayout(layout)
+        return row
+
+    def environment_control_row(self, title, status_label, off_button, on_button, duration_widget):
+        row = QFrame()
+        row.setObjectName("environmentChannelRow")
+
+        layout = QGridLayout()
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionLabel")
+        duration_label = QLabel("Duration")
+        duration_label.setObjectName("metricName")
+
+        toggle_layout = QHBoxLayout()
+        toggle_layout.setContentsMargins(0, 0, 0, 0)
+        toggle_layout.setSpacing(6)
+        toggle_layout.addWidget(off_button)
+        toggle_layout.addWidget(on_button)
+
+        layout.addWidget(title_label, 0, 0)
+        layout.addWidget(status_label, 0, 1, Qt.AlignRight)
+        layout.addLayout(toggle_layout, 1, 0, 1, 2)
+        layout.addWidget(duration_label, 2, 0)
+        layout.addWidget(duration_widget, 2, 1)
+        layout.setColumnStretch(1, 1)
+
+        row.setLayout(layout)
+        return row
 
     def control_card(self, title, first_label, first_widget, second_label, second_widget, action_button, extra_button=None):
         card = QFrame()
@@ -646,7 +778,7 @@ class MainWindow(QMainWindow):
         area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         return area
 
-    def section_card(self, title, icon, content_layout, expanding=False):
+    def section_card(self, title, icon, content_layout, expanding=False, header_widget=None):
         card = QFrame()
         card.setObjectName("sectionCard")
         vertical_policy = QSizePolicy.Expanding if expanding else QSizePolicy.Preferred
@@ -660,16 +792,120 @@ class MainWindow(QMainWindow):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
 
-        icon_label = QLabel()
-        icon_label.setObjectName("sectionIcon")
-        icon_label.setPixmap(icon.pixmap(16, 16))
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionTitle")
+
+        if icon is not None:
+            icon_label = QLabel()
+            icon_label.setObjectName("sectionIcon")
+            icon_label.setPixmap(icon.pixmap(16, 16))
+            header.addWidget(icon_label)
+        header.addWidget(title_label)
+        header.addStretch()
+        if header_widget is not None:
+            header.addWidget(header_widget)
+
+        layout.addLayout(header)
+        content_frame = QFrame()
+        content_frame.setObjectName("logContentFrame")
+        content_frame.setLayout(content_layout)
+        layout.addWidget(content_frame, 1)
+        card.setLayout(layout)
+        return card
+
+    def compact_section_card(self, title, content_layout):
+        card = QFrame()
+        card.setObjectName("compactSectionCard")
+        card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 9, 10, 10)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(0)
 
         title_label = QLabel(title)
         title_label.setObjectName("sectionTitle")
 
+        header.addWidget(title_label)
+        header.addStretch()
+
+        layout.addLayout(header)
+        layout.addLayout(content_layout)
+        card.setLayout(layout)
+        return card
+
+    def graph_card(self, title, color, content_layout):
+        card = QFrame()
+        card.setObjectName("graphCard")
+        card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(14, 11, 14, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+
+        dot = QLabel()
+        dot.setObjectName("graphDot")
+        dot.setStyleSheet(f"background: {color}; border-radius: 5px;")
+        dot.setFixedSize(10, 10)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("graphTitle")
+
+        header.addWidget(dot)
+        header.addWidget(title_label)
+        header.addStretch()
+
+        content_frame = QFrame()
+        content_frame.setObjectName("logContentFrame")
+        content_frame.setLayout(content_layout)
+        content_layout.setContentsMargins(0, 0, 0, 12)
+
+        layout.addLayout(header)
+        layout.addWidget(content_frame, 1)
+        card.setLayout(layout)
+        return card
+
+    def log_card(self, title, content_layout):
+        card = QFrame()
+        card.setObjectName("logCard")
+        card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(14, 11, 14, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+
+        icon_label = QLabel()
+        icon_label.setObjectName("logIcon")
+        icon_label.setPixmap(QIcon(str(self.assets_dir / "list.png")).pixmap(16, 16))
+
+        title_label = QLabel(title)
+        title_label.setObjectName("graphTitle")
+
         header.addWidget(icon_label)
         header.addWidget(title_label)
         header.addStretch()
+        header.addWidget(self.open_data_folder_button)
+        header.addWidget(self.view_full_log_button)
+
+        rows_layout = QHBoxLayout()
+        rows_layout.setContentsMargins(0, 0, 0, 0)
+        rows_layout.setSpacing(3)
+        rows_label = QLabel("Rows:")
+        rows_label.setObjectName("mutedLabel")
+        rows_layout.addWidget(rows_label)
+        rows_layout.addWidget(self.log_rows_selector)
+        header.addLayout(rows_layout)
 
         layout.addLayout(header)
         layout.addLayout(content_layout, 1)
@@ -681,6 +917,52 @@ class MainWindow(QMainWindow):
         label.setObjectName("metricValue")
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         return label
+
+    def reading_row(self, name, value_label, color):
+        row = QFrame()
+        row.setObjectName("compactReadingRow")
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(8)
+
+        dot = QLabel()
+        dot.setObjectName("compactDot")
+        dot.setStyleSheet(f"background: {color}; border-radius: 3px;")
+        dot.setFixedSize(6, 6)
+
+        name_label = QLabel(name)
+        name_label.setObjectName("metricName")
+
+        value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        layout.addWidget(dot)
+        layout.addWidget(name_label)
+        layout.addStretch()
+        layout.addWidget(value_label)
+
+        row.setLayout(layout)
+        return row
+
+    def state_row(self, name, value_label):
+        row = QFrame()
+        row.setObjectName("compactStateRow")
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(8)
+
+        name_label = QLabel(name)
+        name_label.setObjectName("metricName")
+
+        value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        layout.addWidget(name_label)
+        layout.addStretch()
+        layout.addWidget(value_label)
+
+        row.setLayout(layout)
+        return row
 
     def metric_row(self, name, value_label):
         row = QFrame()
@@ -731,50 +1013,23 @@ class MainWindow(QMainWindow):
 
     def reading_icon(self, name):
         if name == "Resistance":
-            return self.style().standardIcon(QStyle.SP_ComputerIcon)
+            return QIcon(str(self.assets_dir / "resistance.png"))
         if name == "Temperature":
-            return self.style().standardIcon(QStyle.SP_FileDialogInfoView)
-        if "NH3" in name:
-            return self.style().standardIcon(QStyle.SP_BrowserReload)
-        return self.style().standardIcon(QStyle.SP_DriveNetIcon)
-
-    def device_row(self, name, status):
-        row = QFrame()
-        row.setObjectName("deviceRow")
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(3)
-
-        name_label = QLabel(name)
-        layout.addWidget(name_label)
-        layout.addWidget(self.mfc_status_label)
-        layout.addWidget(self.mfc_note_label)
-
-        row.setLayout(layout)
-        return row
-
-    def device_status_row(self, name, status_label):
-        row = QFrame()
-        row.setObjectName("deviceStatusRow")
-        layout = QHBoxLayout()
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
-
-        name_label = QLabel(name)
-        name_label.setObjectName("sectionLabel")
-        layout.addWidget(name_label)
-        layout.addStretch()
-        layout.addWidget(status_label)
-
-        row.setLayout(layout)
-        return row
+            return QIcon(str(self.assets_dir / "weather.png"))
+        if "Analyte" in name:
+            return QIcon(str(self.assets_dir / "curve.png"))
+        if name == "Air actual":
+            return QIcon(str(self.assets_dir / "air.png"))
+        return self.style().standardIcon(QStyle.SP_FileIcon)
 
     def toggle_device_setup(self, _checked=False):
-        if not hasattr(self, "device_setup_container"):
-            return
-
-        visible = not self.device_setup_container.isVisible()
-        self.device_setup_container.setVisible(visible)
+        setup_bodies = getattr(self, "device_setup_bodies", [])
+        visible = not setup_bodies[0].isVisible() if setup_bodies else False
+        for body in setup_bodies:
+            body.setVisible(visible)
+        if hasattr(self, "device_status_chevron"):
+            self.device_status_chevron.setIcon(self.chevron_icon(expanded=visible))
+            self.device_status_chevron.setChecked(visible)
         if visible:
             self.mfc_mode_selector.setFocus(Qt.OtherFocusReason)
 
@@ -782,27 +1037,31 @@ class MainWindow(QMainWindow):
         row = QFrame()
         row.setObjectName("deviceRow")
         layout = QVBoxLayout()
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(3)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(6)
 
-        title = QLabel("Multimeter")
-        mode_layout = QHBoxLayout()
-        mode_layout.setContentsMargins(0, 0, 0, 0)
-        mode_layout.setSpacing(5)
-        mode_layout.addWidget(self.multimeter_mode_selector, 1)
-        mode_layout.addWidget(self.scan_visa_button, 0)
-        mode_layout.addWidget(self.connect_multimeter_button, 0)
-
-        connect_layout = QHBoxLayout()
-        connect_layout.setContentsMargins(0, 0, 0, 0)
-        connect_layout.setSpacing(5)
-        connect_layout.addWidget(self.visa_device_selector, 1)
-
-        layout.addWidget(title)
-        layout.addLayout(mode_layout)
-        layout.addLayout(connect_layout)
-        layout.addWidget(self.multimeter_resource_input)
-        layout.addWidget(self.multimeter_status_label)
+        layout.addLayout(self.device_card_header(
+            "Multimeter",
+            self.multimeter_summary_label,
+            "multimeter_status_dot",
+        ))
+        body = self.device_setup_body()
+        body.layout().addLayout(self.device_setting_row(
+            "Mode",
+            self.multimeter_mode_selector,
+            self.connect_multimeter_button,
+        ))
+        body.layout().addLayout(self.device_setting_row(
+            "Device",
+            self.visa_device_selector,
+            self.scan_visa_button,
+        ))
+        body.layout().addWidget(self.multimeter_resource_input)
+        body.layout().addWidget(self.multimeter_status_label)
+        body.setVisible(False)
+        self.device_setup_bodies = getattr(self, "device_setup_bodies", [])
+        self.device_setup_bodies.append(body)
+        layout.addWidget(body)
 
         row.setLayout(layout)
         return row
@@ -811,48 +1070,94 @@ class MainWindow(QMainWindow):
         row = QFrame()
         row.setObjectName("deviceRow")
         layout = QVBoxLayout()
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(3)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(6)
 
-        title = QLabel("MFC Controller")
-
-        mode_layout = QHBoxLayout()
-        mode_layout.setContentsMargins(0, 0, 0, 0)
-        mode_layout.setSpacing(5)
-        mode_layout.addWidget(self.mfc_mode_selector, 1)
-        mode_layout.addWidget(self.scan_mfc_button, 0)
-        mode_layout.addWidget(self.connect_mfc_button, 0)
-
-        port_layout = QHBoxLayout()
-        port_layout.setContentsMargins(0, 0, 0, 0)
-        port_layout.setSpacing(5)
-        port_layout.addWidget(self.mfc_port_selector, 1)
-
-        layout.addWidget(title)
-        layout.addLayout(mode_layout)
-        layout.addLayout(port_layout)
-        layout.addWidget(self.mfc_status_label)
-        layout.addWidget(self.mfc_note_label)
+        layout.addLayout(self.device_card_header(
+            "MFC Controller",
+            self.mfc_summary_label,
+            "mfc_status_dot",
+        ))
+        body = self.device_setup_body()
+        body.layout().addLayout(self.device_setting_row(
+            "Mode",
+            self.mfc_mode_selector,
+            self.connect_mfc_button,
+        ))
+        body.layout().addLayout(self.device_setting_row(
+            "Port",
+            self.mfc_port_selector,
+            self.scan_mfc_button,
+        ))
+        body.layout().addWidget(self.mfc_status_label)
+        body.layout().addWidget(self.mfc_note_label)
+        body.setVisible(False)
+        self.device_setup_bodies = getattr(self, "device_setup_bodies", [])
+        self.device_setup_bodies.append(body)
+        layout.addWidget(body)
 
         row.setLayout(layout)
         return row
 
+    def device_card_header(self, title, status_label, dot_attribute):
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionLabel")
+        status_dot = QLabel()
+        status_dot.setObjectName("deviceStatusDot")
+        status_dot.setProperty("state", "connected")
+        status_dot.setFixedSize(8, 8)
+        setattr(self, dot_attribute, status_dot)
+        header.addWidget(title_label)
+        header.addStretch()
+        header.addWidget(status_dot)
+        header.addWidget(status_label)
+        return header
+
+    def device_setup_body(self):
+        body = QFrame()
+        body.setObjectName("deviceSetupPanel")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 2, 0, 0)
+        layout.setSpacing(5)
+        body.setLayout(layout)
+        return body
+
+    def device_setting_row(self, label_text, selector, button):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+
+        label = QLabel(label_text)
+        label.setObjectName("metricName")
+        label.setFixedWidth(42)
+        row.addWidget(label)
+        row.addWidget(selector, 1)
+        row.addWidget(button, 0)
+        return row
+
     def create_plot(self, title, left_label, units, color):
-        plot = pg.PlotWidget(title=title)
+        plot = pg.PlotWidget()
         plot.setBackground("w")
-        plot.setLabel("left", left_label, units=units)
-        plot.setLabel("bottom", "Time", units="s")
-        plot.showGrid(x=True, y=True, alpha=0.22)
+        plot.setLabel("left", f"{left_label} ({units})", **{"color": "#334155", "font-size": "11px"})
+        plot.setLabel("bottom", "Time (s)", **{"color": "#334155", "font-size": "11px"})
+        plot.showGrid(x=True, y=True, alpha=0.18)
         plot.setMinimumSize(0, 120)
         plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        plot.getAxis("left").setPen(pg.mkPen("#64748b"))
-        plot.getAxis("bottom").setPen(pg.mkPen("#64748b"))
-        plot.getAxis("left").setTextPen(pg.mkPen("#334155"))
-        plot.getAxis("bottom").setTextPen(pg.mkPen("#334155"))
-        plot.setTitle(
-            f"<span style='color: #0f172a; font-weight: 700;'>{title}</span>",
-            size="10pt",
-        )
+        plot.getPlotItem().setContentsMargins(6, 2, 8, 4)
+        plot.getPlotItem().layout.setContentsMargins(4, 2, 8, 4)
+        plot.getAxis("left").setPen(pg.mkPen("#cbd5e1"))
+        plot.getAxis("bottom").setPen(pg.mkPen("#cbd5e1"))
+        plot.getAxis("left").setTextPen(pg.mkPen("#475569"))
+        plot.getAxis("bottom").setTextPen(pg.mkPen("#475569"))
+        plot.getAxis("left").setWidth(58)
+        plot.getAxis("bottom").setHeight(42)
+        plot.getAxis("left").setStyle(tickTextOffset=7)
+        plot.getAxis("bottom").setStyle(tickTextOffset=7)
+        plot.getPlotItem().getViewBox().setBorder(None)
         return plot
 
     def configure_log_table(self):
@@ -864,14 +1169,193 @@ class MainWindow(QMainWindow):
         self.log_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.log_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.log_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.log_table.setMinimumHeight(160)
 
         header = self.log_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
         header.setMinimumSectionSize(58)
+        for column, width in enumerate((70, 85, 125, 135, 110, 105, 95)):
+            self.log_table.setColumnWidth(column, width)
+        header.sectionResized.connect(self.on_log_section_resized)
+        self.log_table.viewport().installEventFilter(self)
+        QTimer.singleShot(0, self.apply_default_log_column_widths)
         self.log_table.verticalHeader().setDefaultSectionSize(26)
+
+    def apply_default_log_column_widths(self):
+        if self.adjusting_log_columns:
+            return
+
+        viewport_width = self.log_table.viewport().width()
+        if viewport_width <= 0:
+            return
+
+        self.adjusting_log_columns = True
+        try:
+            minimum_width = self.log_table.horizontalHeader().minimumSectionSize()
+            ratios = (0.10, 0.12, 0.17, 0.19, 0.15, 0.15, 0.12)
+            used_width = 0
+            last_column = self.log_table.columnCount() - 1
+
+            for column, ratio in enumerate(ratios):
+                if column == last_column:
+                    width = max(minimum_width, viewport_width - used_width)
+                else:
+                    width = max(minimum_width, round(viewport_width * ratio))
+                    used_width += width
+                self.log_table.setColumnWidth(column, width)
+        finally:
+            self.adjusting_log_columns = False
+
+    def eventFilter(self, source, event):
+        if source is self.log_table.viewport() and event.type() == QEvent.Resize:
+            QTimer.singleShot(0, self.fit_log_columns_to_viewport)
+        return super().eventFilter(source, event)
+
+    def on_log_section_resized(self, logical_index, _old_size, _new_size):
+        if self.adjusting_log_columns:
+            return
+        self.fit_log_columns_to_viewport(priority_column=logical_index)
+
+    def fit_log_columns_to_viewport(self, priority_column=None):
+        if self.adjusting_log_columns:
+            return
+
+        self.adjusting_log_columns = True
+        try:
+            header = self.log_table.horizontalHeader()
+            minimum_width = header.minimumSectionSize()
+            columns = range(self.log_table.columnCount())
+            viewport_width = self.log_table.viewport().width()
+            total_width = sum(self.log_table.columnWidth(column) for column in columns)
+
+            if total_width > viewport_width:
+                excess = total_width - viewport_width
+                shrink_order = [
+                    column for column in reversed(range(self.log_table.columnCount()))
+                    if column != priority_column
+                ]
+                for column in shrink_order:
+                    if excess <= 0:
+                        break
+                    width = self.log_table.columnWidth(column)
+                    shrink_by = min(excess, max(0, width - minimum_width))
+                    if shrink_by > 0:
+                        self.log_table.setColumnWidth(column, width - shrink_by)
+                        excess -= shrink_by
+
+                if excess > 0 and priority_column is not None:
+                    width = self.log_table.columnWidth(priority_column)
+                    shrink_by = min(excess, max(0, width - minimum_width))
+                    if shrink_by > 0:
+                        self.log_table.setColumnWidth(priority_column, width - shrink_by)
+            elif total_width < viewport_width and self.log_table.columnCount() > 0:
+                last_column = self.log_table.columnCount() - 1
+                self.log_table.setColumnWidth(
+                    last_column,
+                    self.log_table.columnWidth(last_column) + viewport_width - total_width,
+                )
+        finally:
+            self.adjusting_log_columns = False
+
+    def on_log_rows_changed(self, value):
+        self.max_log_preview_rows = int(value)
+        self.update_log_preview_height()
+        while self.log_table.rowCount() > self.max_log_preview_rows:
+            self.log_table.removeRow(0)
+        self.log_table.scrollToBottom()
+
+    def update_log_preview_height(self):
+        if not hasattr(self, "log_card_widget"):
+            return
+
+        if self.max_log_preview_rows <= 5:
+            self.log_card_widget.setMaximumHeight(245)
+        else:
+            self.log_card_widget.setMaximumHeight(16777215)
 
     def duration_ms(self, duration_input):
         return duration_input.value() * 1000
+
+    def setup_environment_countdowns(self):
+        self.environment_countdowns = {
+            "humidity": {
+                "timer": QTimer(self),
+                "duration": self.humidity_duration,
+                "on_button": self.humidity_on_button,
+                "off_button": self.humidity_off_button,
+                "remaining": 0,
+                "original": 0,
+            },
+            "heating": {
+                "timer": QTimer(self),
+                "duration": self.heating_duration,
+                "on_button": self.heating_on_button,
+                "off_button": self.heating_off_button,
+                "remaining": 0,
+                "original": 0,
+            },
+        }
+
+        for name, countdown in self.environment_countdowns.items():
+            countdown["timer"].setInterval(1000)
+            countdown["timer"].timeout.connect(
+                lambda name=name: self.tick_environment_countdown(name)
+            )
+
+    def start_environment_countdown(self, name, seconds):
+        if seconds <= 0:
+            return
+
+        countdown = self.environment_countdowns[name]
+        timer = countdown["timer"]
+        if timer.isActive():
+            timer.stop()
+
+        countdown["original"] = seconds
+        countdown["remaining"] = seconds
+        countdown["duration"].setValue(seconds)
+        countdown["duration"].setEnabled(False)
+        countdown["on_button"].setEnabled(False)
+        countdown["off_button"].setEnabled(True)
+        timer.start()
+
+    def tick_environment_countdown(self, name):
+        countdown = self.environment_countdowns[name]
+        countdown["remaining"] = max(0, countdown["remaining"] - 1)
+        countdown["duration"].setValue(countdown["remaining"])
+
+        if countdown["remaining"] == 0:
+            self.finish_environment_countdown(name, restore=True)
+
+    def finish_environment_countdown(self, name, restore):
+        countdown = self.environment_countdowns[name]
+        countdown["timer"].stop()
+
+        if restore:
+            countdown["duration"].setValue(countdown["original"])
+
+        countdown["remaining"] = 0
+        self.apply_environment_countdown_locks()
+
+    def cancel_environment_countdown(self, name, restore=True):
+        countdown = self.environment_countdowns[name]
+        if not countdown["timer"].isActive():
+            return
+
+        self.finish_environment_countdown(name, restore=restore)
+
+    def cancel_all_environment_countdowns(self, restore=True):
+        for name in self.environment_countdowns:
+            self.cancel_environment_countdown(name, restore=restore)
+
+    def apply_environment_countdown_locks(self):
+        controls_enabled = not self.is_real_mfc_mode()
+        for countdown in self.environment_countdowns.values():
+            active = countdown["timer"].isActive()
+            countdown["duration"].setEnabled(controls_enabled and not active)
+            countdown["on_button"].setEnabled(controls_enabled and not active)
+            countdown["off_button"].setEnabled(controls_enabled)
 
     def start_experiment(self):
         # UI preview data is deliberately cleared before each run. The manager
@@ -899,6 +1383,10 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.data_directory))
 
     def open_current_log(self):
+        if self.is_experiment_running():
+            self.file_label.setText("Stop the experiment before opening the full log")
+            return
+
         if not self.current_file_path:
             self.file_label.setText("No experiment file to open yet")
             return
@@ -945,6 +1433,8 @@ class MainWindow(QMainWindow):
         self.completed_experiment_exists = False
         self.current_file_path = filename
         self.format_selector.setEnabled(False)
+        self.view_full_log_button.setEnabled(False)
+        self.update_device_setup_controls_enabled()
         self.status_label.setText("RUNNING")
         self.set_status_badge_state("running")
         self.file_label.setText(filename)
@@ -953,8 +1443,11 @@ class MainWindow(QMainWindow):
     def on_experiment_stopped(self, message):
         self.completed_experiment_exists = True
         self.format_selector.setEnabled(True)
+        self.view_full_log_button.setEnabled(bool(self.current_file_path))
+        self.update_device_setup_controls_enabled()
         self.status_label.setText("STOPPED")
         self.set_status_badge_state("stopped")
+        self.cancel_all_environment_countdowns(restore=False)
         self.reset_duration_controls()
         self.file_label.setText(message)
         self.bottom_acquisition_label.setText("Acquisition stopped")
@@ -979,14 +1472,52 @@ class MainWindow(QMainWindow):
         ):
             duration_control.setValue(0)
 
+    def is_experiment_running(self):
+        return self.manager.acquisition_timer.isActive()
+
+    def update_device_setup_controls_enabled(self):
+        setup_enabled = not self.is_experiment_running()
+        multimeter_real = self.is_real_multimeter_mode()
+        mfc_real = self.is_real_mfc_mode()
+
+        self.multimeter_mode_selector.setEnabled(setup_enabled)
+        self.connect_multimeter_button.setEnabled(setup_enabled)
+        self.visa_device_selector.setEnabled(setup_enabled and multimeter_real)
+        self.multimeter_resource_input.setEnabled(setup_enabled and multimeter_real)
+        self.scan_visa_button.setEnabled(setup_enabled and multimeter_real)
+
+        self.mfc_mode_selector.setEnabled(setup_enabled)
+        self.connect_mfc_button.setEnabled(setup_enabled)
+        self.mfc_port_selector.setEnabled(setup_enabled and mfc_real)
+        self.scan_mfc_button.setEnabled(setup_enabled and mfc_real)
+
     def on_multimeter_mode_changed(self, text):
         is_real = text == "Real multimeter"
-        self.visa_device_selector.setEnabled(is_real)
-        self.multimeter_resource_input.setEnabled(is_real)
-        self.scan_visa_button.setEnabled(is_real)
         self.connect_multimeter_button.setText("Connect" if is_real else "Use")
+        if is_real:
+            self.multimeter_status_label.setText("Not connected")
+            self.set_device_summary(
+                self.multimeter_summary_label,
+                self.multimeter_status_dot,
+                "Not Connected",
+                "disconnected",
+            )
+        else:
+            self.multimeter_status_label.setText("Connected: Simulated")
+            self.set_device_summary(
+                self.multimeter_summary_label,
+                self.multimeter_status_dot,
+                "Simulated",
+                "connected",
+            )
+            if self.manager.multimeter_mode != "simulation":
+                self.manager.set_multimeter_mode("simulation", "")
+        self.update_device_setup_controls_enabled()
 
     def scan_visa_devices(self):
+        if self.is_experiment_running():
+            return
+
         self.visa_device_selector.clear()
         self.visa_device_selector.addItem("Scanning...", "")
         self.visa_device_selector.setEnabled(False)
@@ -1000,8 +1531,7 @@ class MainWindow(QMainWindow):
             self.on_device_error(f"VISA scan failed: {exc}")
             return
         finally:
-            self.visa_device_selector.setEnabled(True)
-            self.scan_visa_button.setEnabled(True)
+            self.update_device_setup_controls_enabled()
 
         self.visa_device_selector.clear()
         if not instruments:
@@ -1037,6 +1567,9 @@ class MainWindow(QMainWindow):
         return resource[:38]
 
     def connect_multimeter(self):
+        if self.is_experiment_running():
+            return
+
         if self.is_real_multimeter_mode():
             resource = self.multimeter_resource_input.text().strip()
             if not resource:
@@ -1051,44 +1584,80 @@ class MainWindow(QMainWindow):
             self.status_label.setText("IDLE")
             self.set_status_badge_state("idle")
             self.file_label.setText("Multimeter ready")
+        elif self.is_real_multimeter_mode():
+            self.set_device_summary(
+                self.multimeter_summary_label,
+                self.multimeter_status_dot,
+                "Not Connected",
+                "disconnected",
+            )
 
     def on_multimeter_changed(self, mode, status):
         if mode == "real":
             self.multimeter_status_label.setText("Connected: real multimeter")
-            self.multimeter_summary_label.setText("real")
+            self.set_device_summary(
+                self.multimeter_summary_label,
+                self.multimeter_status_dot,
+                "Connected",
+                "connected",
+            )
             self.multimeter_status_label.setToolTip(status)
         else:
-            self.multimeter_status_label.setText("Connected: simulated")
-            self.multimeter_summary_label.setText("simulated")
+            self.multimeter_status_label.setText("Connected: Simulated")
+            self.set_device_summary(
+                self.multimeter_summary_label,
+                self.multimeter_status_dot,
+                "Simulated",
+                "connected",
+            )
             self.multimeter_status_label.setToolTip(status)
 
     def on_mfc_mode_changed(self, text):
         is_real = text == "Real MFC"
-        self.mfc_port_selector.setEnabled(is_real)
-        self.scan_mfc_button.setEnabled(is_real)
         self.connect_mfc_button.setText("Connect" if is_real else "Use")
         self.set_mfc_write_controls_enabled(not is_real)
 
         if is_real:
+            self.mfc_status_label.setText("Not connected")
+            self.set_device_summary(
+                self.mfc_summary_label,
+                self.mfc_status_dot,
+                "Not Connected",
+                "disconnected",
+            )
             self.mfc_note_label.setText(
                 "Flow writes disabled."
             )
             self.manual_mode_label.setText(
-                "Real MFC mode (read-only) - flow control is disabled"
+                "Real MFC mode (read-only). Flow control is disabled"
             )
             self.bottom_mode_label.setText(
-                "Read-only mode: MFC readings are allowed, flow control is disabled"
+                "Read-only mode: MFC readings are allowed, flow control is disabled."
             )
         else:
+            self.mfc_status_label.setText("Connected: Simulated")
+            self.mfc_status_label.setToolTip(self.manager.mfc_status_text())
+            self.set_device_summary(
+                self.mfc_summary_label,
+                self.mfc_status_dot,
+                "Simulated",
+                "connected",
+            )
+            if self.manager.mfc_mode != "simulation":
+                self.manager.set_mfc_mode("simulation")
             self.mfc_note_label.setText(
                 "Simulated MFC: gas controls affect only the software model."
             )
             self.manual_mode_label.setText(
-                "Simulated MFC mode - software model only"
+                "Simulated MFC mode. Software model only."
             )
             self.bottom_mode_label.setText("Simulation mode ready")
+        self.update_device_setup_controls_enabled()
 
     def scan_mfc_ports(self):
+        if self.is_experiment_running():
+            return
+
         self.mfc_port_selector.clear()
 
         if list_ports is None:
@@ -1111,6 +1680,9 @@ class MainWindow(QMainWindow):
         self.file_label.setText(f"Found {len(ports)} COM port(s)")
 
     def connect_mfc(self):
+        if self.is_experiment_running():
+            return
+
         if self.is_real_mfc_mode():
             port = self.mfc_port_selector.currentData() or self.mfc_port_selector.currentText()
             port = port.strip()
@@ -1126,18 +1698,54 @@ class MainWindow(QMainWindow):
             self.status_label.setText("IDLE")
             self.set_status_badge_state("idle")
             self.file_label.setText("MFC ready")
+        elif self.is_real_mfc_mode():
+            self.set_device_summary(
+                self.mfc_summary_label,
+                self.mfc_status_dot,
+                "Not Connected",
+                "disconnected",
+            )
 
     def on_mfc_changed(self, mode, status):
         if mode == "real":
             self.mfc_status_label.setText(self.compact_mfc_status(status))
-            self.mfc_summary_label.setText("real read-only")
+            self.set_device_summary(
+                self.mfc_summary_label,
+                self.mfc_status_dot,
+                "Connected",
+                "connected",
+            )
             self.mfc_status_label.setToolTip(status)
             self.set_mfc_write_controls_enabled(False)
         else:
-            self.mfc_status_label.setText("Connected: simulated")
-            self.mfc_summary_label.setText("simulated")
+            if self.is_real_mfc_mode():
+                self.mfc_status_label.setText("Not connected")
+                self.set_device_summary(
+                    self.mfc_summary_label,
+                    self.mfc_status_dot,
+                    "Not Connected",
+                    "disconnected",
+                )
+                self.set_mfc_write_controls_enabled(False)
+            else:
+                self.mfc_status_label.setText("Connected: Simulated")
+                self.set_device_summary(
+                    self.mfc_summary_label,
+                    self.mfc_status_dot,
+                    "Simulated",
+                    "connected",
+                )
+                self.set_mfc_write_controls_enabled(True)
             self.mfc_status_label.setToolTip(status)
-            self.set_mfc_write_controls_enabled(True)
+
+    @staticmethod
+    def set_device_summary(label, dot, text, state):
+        label.setText(text)
+        label.setProperty("state", state)
+        dot.setProperty("state", state)
+        for widget in (label, dot):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     @staticmethod
     def compact_mfc_status(status):
@@ -1195,6 +1803,7 @@ class MainWindow(QMainWindow):
         ]
         for widget in widgets:
             widget.setEnabled(enabled)
+        self.apply_environment_countdown_locks()
 
     def apply_nh3(self):
         self.manager.apply_nh3(
@@ -1206,16 +1815,26 @@ class MainWindow(QMainWindow):
         self.manager.apply_air(self.air_control.value())
 
     def set_humidity(self, enabled):
+        duration_seconds = self.humidity_duration.value()
         self.manager.set_humidity(
             enabled,
-            self.duration_ms(self.humidity_duration),
+            duration_seconds * 1000,
         )
+        if enabled:
+            self.start_environment_countdown("humidity", duration_seconds)
+        else:
+            self.cancel_environment_countdown("humidity", restore=True)
 
     def set_heating(self, enabled):
+        duration_seconds = self.heating_duration.value()
         self.manager.set_heating(
             enabled,
-            self.duration_ms(self.heating_duration),
+            duration_seconds * 1000,
         )
+        if enabled:
+            self.start_environment_countdown("heating", duration_seconds)
+        else:
+            self.cancel_environment_countdown("heating", restore=True)
 
     def refresh_state_label(self, state):
         humidity = "ON" if state.humidity_on else "OFF"
@@ -1225,9 +1844,33 @@ class MainWindow(QMainWindow):
         self.air_value_label.setText(f"{state.air_actual_sccm:g} sccm")
         self.humidity_value_label.setText(humidity)
         self.heating_value_label.setText(heating)
+        self.humidity_status_label.setText(humidity)
+        self.heating_status_label.setText(heating)
+        self.set_toggle_active(self.humidity_on_button, state.humidity_on)
+        self.set_toggle_active(self.humidity_off_button, not state.humidity_on)
+        self.set_toggle_active(self.heating_on_button, state.heating_on)
+        self.set_toggle_active(self.heating_off_button, not state.heating_on)
+        self.set_label_active(self.humidity_status_label, state.humidity_on)
+        self.set_label_active(self.heating_status_label, state.heating_on)
+        if not state.humidity_on:
+            self.cancel_environment_countdown("humidity", restore=True)
+        if not state.heating_on:
+            self.cancel_environment_countdown("heating", restore=True)
 
         self.nh3_control.setValue(state.nh3_setpoint_sccm)
         self.air_control.setValue(state.air_setpoint_sccm)
+
+    @staticmethod
+    def set_toggle_active(button, active):
+        button.setProperty("active", "true" if active else "false")
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+    @staticmethod
+    def set_label_active(label, active):
+        label.setProperty("active", "true" if active else "false")
+        label.style().unpolish(label)
+        label.style().polish(label)
 
     def on_data_acquired(self, data, event):
         self.time_data.append(data["elapsed_s"])
@@ -1242,7 +1885,7 @@ class MainWindow(QMainWindow):
             self.format_number(data["resistance_ohm"], suffix=" Ohm", precision=2)
         )
         self.temperature_value_label.setText(
-            self.format_number(data["temperature_c"], suffix=" deg C", precision=2)
+            self.format_number(data["temperature_c"], suffix=" °C", precision=2)
         )
         self.nh3_actual_label.setText(f"{data['nh3_actual_sccm']:.2f} sccm")
         self.air_actual_label.setText(f"{data['air_actual_sccm']:.2f} sccm")
@@ -1308,11 +1951,14 @@ class MainWindow(QMainWindow):
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.log_table.setItem(row, col, item)
 
+        self.log_table.scrollToBottom()
+
     def closeEvent(self, event):
         self.manager.close()
         event.accept()
 
     def apply_styles(self):
+        chevron_down_path = (self.assets_dir / "chevron_down.svg").as_posix()
         self.setStyleSheet("""
             QWidget#appBackground {
                 background: #f6f8fb;
@@ -1363,6 +2009,48 @@ class MainWindow(QMainWindow):
                 border: 1px solid #dce5ef;
                 border-radius: 8px;
             }
+            QFrame#compactSectionCard {
+                background: #ffffff;
+                border: 1px solid #dce5ef;
+                border-radius: 8px;
+            }
+            QFrame#graphCard {
+                background: #ffffff;
+                border: 1px solid #dce5ef;
+                border-radius: 8px;
+            }
+            QFrame#logCard {
+                background: #ffffff;
+                border: 1px solid #dce5ef;
+                border-radius: 8px;
+            }
+            QFrame#logContentFrame {
+                border: none;
+                background: transparent;
+                padding-bottom: 8px;
+            }
+            QLabel#graphTitle {
+                color: #0f172a;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QLabel#graphDot {
+                min-width: 10px;
+                max-width: 10px;
+                min-height: 10px;
+                max-height: 10px;
+            }
+            QLabel#graphAction {
+                color: #475569;
+                font-size: 16px;
+                font-weight: 700;
+                min-width: 22px;
+                max-width: 22px;
+            }
+            QLabel#logIcon {
+                min-width: 16px;
+                max-width: 16px;
+            }
             QLabel#sectionTitle {
                 color: #0f172a;
                 font-size: 13px;
@@ -1372,11 +2060,26 @@ class MainWindow(QMainWindow):
                 min-width: 16px;
                 max-width: 16px;
             }
+            QPushButton#sectionChevron {
+                background: transparent;
+                border: none;
+                color: #475569;
+                font-size: 16px;
+                font-weight: 700;
+                padding: 0;
+                min-height: 20px;
+            }
+            QPushButton#sectionChevron:hover {
+                background: #eef2f7;
+                border-radius: 4px;
+            }
             QFrame#metricRow,
             QFrame#deviceRow,
             QFrame#deviceStatusRow,
             QFrame#readingCard,
-            QFrame#controlCard {
+            QFrame#controlCard,
+            QFrame#gasChannelRow,
+            QFrame#environmentChannelRow {
                 background: #fbfcfe;
                 border: 1px solid #e2e8f0;
                 border-radius: 7px;
@@ -1388,6 +2091,20 @@ class MainWindow(QMainWindow):
             QFrame#metricRow {
                 min-height: 34px;
                 max-height: 38px;
+            }
+            QFrame#compactReadingRow,
+            QFrame#compactStateRow {
+                background: transparent;
+                border: none;
+                border-bottom: 1px solid #edf2f7;
+                min-height: 36px;
+                max-height: 40px;
+            }
+            QLabel#compactDot {
+                min-width: 6px;
+                max-width: 6px;
+                min-height: 6px;
+                max-height: 6px;
             }
             QLabel {
                 color: #233244;
@@ -1411,14 +2128,30 @@ class MainWindow(QMainWindow):
                 font-size: 12px;
                 font-weight: 700;
             }
-            QLabel#warningLabel {
+            QFrame#warningFrame {
                 background: #fffbeb;
                 border: 1px solid #facc15;
                 border-radius: 7px;
+                min-height: 34px;
+            }
+            QLabel#warningLabel {
                 color: #92400e;
-                padding: 5px 8px;
                 font-size: 11px;
                 font-weight: 600;
+            }
+            QLabel#warningIcon {
+                min-width: 16px;
+                max-width: 16px;
+                min-height: 16px;
+                max-height: 16px;
+            }
+            QLabel#envStatus {
+                color: #64748b;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QLabel#envStatus[active="true"] {
+                color: #15803d;
             }
             QLabel#metricValue,
             QLabel#toolbarValue {
@@ -1442,6 +2175,11 @@ class MainWindow(QMainWindow):
                 color: #0f9f9a;
                 font-size: 20px;
             }
+            QLabel#metricValue[compactMetric="true"] {
+                color: #0f172a;
+                font-size: 14px;
+                font-weight: 600;
+            }
             QLabel#statusBadge {
                 background: #dcfce7;
                 color: #15803d;
@@ -1453,19 +2191,36 @@ class MainWindow(QMainWindow):
             QLabel#statusBadge[state="running"] {
                 background: #dcfce7;
                 color: #15803d;
+                border-color: #86efac;
             }
             QLabel#statusBadge[state="error"] {
                 background: #fee2e2;
                 color: #dc2626;
+                border-color: #fca5a5;
             }
             QLabel#statusBadge[state="stopped"] {
                 background: #fee2e2;
                 color: #dc2626;
+                border-color: #fca5a5;
             }
             QLabel#connectedLabel {
                 color: #16a34a;
                 font-size: 11px;
                 font-weight: 600;
+            }
+            QLabel#connectedLabel[state="disconnected"] {
+                color: #dc2626;
+            }
+            QLabel#deviceStatusDot {
+                background: #16a34a;
+                border-radius: 4px;
+                min-width: 8px;
+                max-width: 8px;
+                min-height: 8px;
+                max-height: 8px;
+            }
+            QLabel#deviceStatusDot[state="disconnected"] {
+                background: #dc2626;
             }
             QLabel#readingIcon {
                 color: #64748b;
@@ -1525,9 +2280,50 @@ class MainWindow(QMainWindow):
                 border-left-color: #e2e8f0;
             }
             QComboBox::down-arrow {
-                image: url(gas_sensor_daq/ui/assets/chevron_down.svg);
+                image: url("__CHEVRON_DOWN__");
                 width: 12px;
                 height: 12px;
+            }
+            QComboBox#logRowsSelector {
+                border: none;
+                background: transparent;
+                padding: 0 18px 0 0;
+                min-height: 22px;
+                color: #334155;
+                font-weight: 600;
+            }
+            QComboBox#logRowsSelector::drop-down {
+                width: 18px;
+                border: none;
+            }
+            QComboBox#logRowsSelector::drop-down:hover {
+                background: transparent;
+                border: none;
+            }
+            QComboBox#logRowsSelector::down-arrow {
+                image: url("__CHEVRON_DOWN__");
+                width: 10px;
+                height: 10px;
+            }
+            QListView#logRowsPopup {
+                background: #ffffff;
+                color: #172033;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                outline: none;
+                padding: 2px;
+                selection-background-color: #dbeafe;
+                selection-color: #0f172a;
+            }
+            QListView#logRowsPopup::item {
+                min-height: 22px;
+                padding: 3px 8px;
+                background: #ffffff;
+            }
+            QListView#logRowsPopup::item:hover,
+            QListView#logRowsPopup::item:selected {
+                background: #dbeafe;
+                color: #0f172a;
             }
             QPushButton {
                 min-height: 24px;
@@ -1540,6 +2336,18 @@ class MainWindow(QMainWindow):
             QPushButton:hover {
                 background: #f8fafc;
                 border-color: #94a3b8;
+            }
+            QPushButton#logActionButton {
+                min-height: 24px;
+                padding: 2px 9px;
+                border-radius: 6px;
+                color: #172033;
+                background: #ffffff;
+            }
+            QPushButton#logActionButton:disabled {
+                color: #94a3b8;
+                background: #f1f5f9;
+                border-color: #dbe3ee;
             }
             QPushButton#stepButton {
                 min-height: 24px;
@@ -1559,6 +2367,26 @@ class MainWindow(QMainWindow):
             QPushButton#primaryButton:hover {
                 background: #dcfce7;
                 border-color: #16a34a;
+            }
+            QPushButton#secondaryButton {
+                color: #334155;
+                border-color: #cbd5e1;
+                background: #ffffff;
+                font-weight: 600;
+            }
+            QPushButton#secondaryButton:hover {
+                background: #f8fafc;
+                border-color: #94a3b8;
+            }
+            QPushButton#toggleButton {
+                min-height: 28px;
+                font-weight: 600;
+            }
+            QPushButton#toggleButton[active="true"] {
+                color: #15803d;
+                border-color: #22c55e;
+                background: #ecfdf3;
+                font-weight: 700;
             }
             QPushButton#stopButton {
                 color: #dc2626;
@@ -1595,4 +2423,4 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
                 font-size: 11px;
             }
-        """)
+        """.replace("__CHEVRON_DOWN__", chevron_down_path))

@@ -39,8 +39,13 @@ class AcquisitionManager(QObject):
         self.mfc_address = settings.mfc_address
         self.data_directory = settings.data_directory
         self.logger = None
-        self.pending_event = ""
+        self.pending_events = []
         self.experiment_start_time = None
+        self.control_timer_tokens = {
+            "analyte": 0,
+            "humidity": 0,
+            "heating": 0,
+        }
 
         self.acquisition_timer = QTimer(self)
         self.acquisition_timer.timeout.connect(self.acquire_once)
@@ -139,7 +144,7 @@ class AcquisitionManager(QObject):
             # Every Start creates a fresh experiment file. Resume/append would
             # need explicit metadata handling and is intentionally not implicit.
             self.multimeter.reset_time()
-            self.pending_event = ""
+            self.pending_events = []
             self.experiment_start_time = datetime.now()
             self.data_directory = data_directory or self.data_directory
             os.makedirs(self.data_directory, exist_ok=True)
@@ -164,6 +169,7 @@ class AcquisitionManager(QObject):
     def stop_experiment(self, message="Experiment finished"):
         self.acquisition_timer.stop()
         self.elapsed_timer.stop()
+        self.invalidate_control_timers()
 
         self.safe_shutdown_controls()
 
@@ -192,6 +198,7 @@ class AcquisitionManager(QObject):
     def close(self):
         self.acquisition_timer.stop()
         self.elapsed_timer.stop()
+        self.invalidate_control_timers()
 
         if self.logger is not None:
             try:
@@ -217,23 +224,44 @@ class AcquisitionManager(QObject):
         self.elapsed_changed.emit(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
 
     def set_event(self, text):
-        self.pending_event = text
+        if text:
+            self.pending_events.append(text)
+
+    def consume_pending_events(self):
+        event = "; ".join(self.pending_events)
+        self.pending_events = []
+        return event
+
+    def next_control_timer_token(self, name):
+        self.control_timer_tokens[name] += 1
+        return self.control_timer_tokens[name]
+
+    def control_timer_is_current(self, name, token):
+        return self.control_timer_tokens.get(name) == token
+
+    def invalidate_control_timers(self):
+        for name in self.control_timer_tokens:
+            self.control_timer_tokens[name] += 1
 
     def apply_nh3(self, flow_sccm, duration_ms=0):
-        if not self.safe_command("Set NH3 flow failed", self.mfc.set_nh3_flow, flow_sccm):
+        if not self.safe_command("Set analyte flow failed", self.mfc.set_nh3_flow, flow_sccm):
             return
 
-        self.set_event(f"Set NH3 flow = {flow_sccm} sccm")
+        token = self.next_control_timer_token("analyte")
+        self.set_event(f"Set analyte flow = {flow_sccm} sccm")
         self.emit_state_changed()
 
         if duration_ms > 0:
-            QTimer.singleShot(duration_ms, self.reset_nh3)
+            QTimer.singleShot(duration_ms, lambda token=token: self.reset_nh3(token))
 
-    def reset_nh3(self):
-        if not self.safe_command("Reset NH3 failed", self.mfc.set_nh3_flow, 0):
+    def reset_nh3(self, timer_token=None):
+        if timer_token is not None and not self.control_timer_is_current("analyte", timer_token):
             return
 
-        self.set_event("NH3 duration ended")
+        if not self.safe_command("Reset analyte flow failed", self.mfc.set_nh3_flow, 0):
+            return
+
+        self.set_event("Analyte duration ended")
         self.emit_state_changed()
 
     def apply_air(self, flow_sccm):
@@ -247,6 +275,7 @@ class AcquisitionManager(QObject):
         if not self.safe_command("Air purge failed", self.mfc.air_purge):
             return
 
+        self.next_control_timer_token("analyte")
         self.set_event("Air purge")
         self.emit_state_changed()
 
@@ -254,23 +283,33 @@ class AcquisitionManager(QObject):
         if not self.safe_command("Set humidity failed", self.mfc.set_humidity, enabled):
             return
 
+        token = self.next_control_timer_token("humidity")
         state = "ON" if enabled else "OFF"
         self.set_event(f"Humidity {state}")
         self.emit_state_changed()
 
         if enabled and duration_ms > 0:
-            QTimer.singleShot(duration_ms, lambda: self.set_humidity(False))
+            QTimer.singleShot(duration_ms, lambda token=token: self.expire_humidity(token))
+
+    def expire_humidity(self, timer_token):
+        if self.control_timer_is_current("humidity", timer_token):
+            self.set_humidity(False)
 
     def set_heating(self, enabled, duration_ms=0):
         if not self.safe_command("Set heating failed", self.mfc.set_heating, enabled):
             return
 
+        token = self.next_control_timer_token("heating")
         state = "ON" if enabled else "OFF"
         self.set_event(f"Heating {state}")
         self.emit_state_changed()
 
         if enabled and duration_ms > 0:
-            QTimer.singleShot(duration_ms, lambda: self.set_heating(False))
+            QTimer.singleShot(duration_ms, lambda token=token: self.expire_heating(token))
+
+    def expire_heating(self, timer_token):
+        if self.control_timer_is_current("heating", timer_token):
+            self.set_heating(False)
 
     def acquire_once(self):
         # Acquisition order matters: read the control state first, then attach
@@ -289,7 +328,7 @@ class AcquisitionManager(QObject):
 
         try:
             record = self.multimeter.read(state)
-            record.event = self.pending_event
+            record.event = "; ".join(self.pending_events)
         except Exception as exc:
             message = self.format_device_error(
                 "Multimeter connection lost during measurement",
@@ -308,10 +347,10 @@ class AcquisitionManager(QObject):
                 self.stop_experiment("Stopped: logger write failed")
                 return
 
-        event = self.pending_event
+        event = self.consume_pending_events()
+        record.event = event
         # Events are one-shot annotations. The next row should be blank unless
         # another user action or device error occurs.
-        self.pending_event = ""
         self.data_acquired.emit(record.to_dict(), event)
 
     def emit_state_changed(self):
@@ -333,7 +372,7 @@ class AcquisitionManager(QObject):
         self.handle_device_error_message(message)
 
     def handle_device_error_message(self, message):
-        self.pending_event = message
+        self.set_event(message)
         self.device_error.emit(message)
 
     @staticmethod
