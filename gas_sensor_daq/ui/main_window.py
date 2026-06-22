@@ -2,7 +2,7 @@ import math
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap, QPolygon, QTransform
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QPolygon, QTransform
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
         self.time_data = []
         self.resistance_data = []
         self.temperature_data = []
+        self.event_markers = []
         self.completed_experiment_exists = False
         self.max_log_preview_rows = 5
         self.adjusting_log_columns = False
@@ -1369,6 +1370,7 @@ class MainWindow(QMainWindow):
         self.time_data.clear()
         self.resistance_data.clear()
         self.temperature_data.clear()
+        self.clear_event_markers()
         self.log_table.setRowCount(0)
 
         self.resistance_curve.setData([], [])
@@ -1816,10 +1818,13 @@ class MainWindow(QMainWindow):
 
     def set_humidity(self, enabled):
         duration_seconds = self.humidity_duration.value()
-        self.manager.set_humidity(
+        command_applied = self.manager.set_humidity(
             enabled,
             duration_seconds * 1000,
         )
+        if not command_applied:
+            return
+
         if enabled:
             self.start_environment_countdown("humidity", duration_seconds)
         else:
@@ -1827,10 +1832,13 @@ class MainWindow(QMainWindow):
 
     def set_heating(self, enabled):
         duration_seconds = self.heating_duration.value()
-        self.manager.set_heating(
+        command_applied = self.manager.set_heating(
             enabled,
             duration_seconds * 1000,
         )
+        if not command_applied:
+            return
+
         if enabled:
             self.start_environment_countdown("heating", duration_seconds)
         else:
@@ -1879,6 +1887,8 @@ class MainWindow(QMainWindow):
 
         self.resistance_curve.setData(self.time_data, self.resistance_data)
         self.temperature_curve.setData(self.time_data, self.temperature_data)
+        if event:
+            self.add_event_marker(data["elapsed_s"], event)
         self.update_plot_ranges()
 
         self.resistance_value_label.setText(
@@ -1911,6 +1921,98 @@ class MainWindow(QMainWindow):
             high = max(temperature_values)
             padding = max((high - low) * 0.25, 1)
             self.temperature_plot.setYRange(low - padding, high + padding, padding=0)
+
+        self.update_event_marker_labels()
+
+    def add_event_marker(self, elapsed_s, event):
+        color = self.event_color(event)
+        pen = pg.mkPen(color=color, width=1, style=Qt.DashLine)
+
+        resistance_line = pg.InfiniteLine(pos=elapsed_s, angle=90, movable=False, pen=pen)
+        temperature_line = pg.InfiniteLine(pos=elapsed_s, angle=90, movable=False, pen=pen)
+        self.resistance_plot.addItem(resistance_line)
+        self.temperature_plot.addItem(temperature_line)
+
+        label = pg.TextItem(
+            text=self.short_event_label(event),
+            color=color,
+            anchor=(0.5, 0.0),
+            border=pg.mkPen(color),
+            fill=pg.mkBrush(255, 255, 255, 225),
+        )
+        label.setFont(QFont("Segoe UI", 8))
+        label.setZValue(20)
+        label_plot = self.event_label_plot(event)
+        label_plot.addItem(label)
+        self.event_markers.append({
+            "x": elapsed_s,
+            "level": len(self.event_markers) % 3,
+            "label": label,
+            "label_plot": label_plot,
+            "resistance_line": resistance_line,
+            "temperature_line": temperature_line,
+        })
+        self.update_event_marker_labels()
+
+    def update_event_marker_labels(self):
+        if not self.event_markers:
+            return
+
+        for marker in self.event_markers:
+            _x_range, y_range = marker["label_plot"].getViewBox().viewRange()
+            y_top = y_range[1]
+            y_span = y_range[1] - y_range[0]
+            y_offset = y_span * (0.08 + marker["level"] * 0.11)
+            marker["label"].setPos(marker["x"], y_top - y_offset)
+
+    def clear_event_markers(self):
+        for marker in self.event_markers:
+            self.resistance_plot.removeItem(marker["resistance_line"])
+            self.temperature_plot.removeItem(marker["temperature_line"])
+            marker["label_plot"].removeItem(marker["label"])
+        self.event_markers.clear()
+
+    def event_label_plot(self, event):
+        if "heating" in event.lower():
+            return self.temperature_plot
+        return self.resistance_plot
+
+    @staticmethod
+    def event_color(event):
+        event_lower = event.lower()
+        if "heating" in event_lower:
+            return "#ef4444"
+        if "humidity" in event_lower:
+            return "#14b8a6"
+        if "air" in event_lower:
+            return "#22c55e"
+        if "analyte" in event_lower:
+            return "#8b5cf6"
+        return "#64748b"
+
+    @staticmethod
+    def short_event_label(event):
+        labels = []
+        for part in event.split("; "):
+            text = part.strip()
+            lower = text.lower()
+            if lower.startswith("set analyte flow"):
+                value = text.split("=", 1)[-1].strip()
+                labels.append(f"Analyte {value}")
+            elif lower.startswith("set air flow"):
+                value = text.split("=", 1)[-1].strip()
+                labels.append(f"Air {value}")
+            elif lower == "air purge":
+                labels.append("Air Purge")
+            elif lower.startswith("humidity"):
+                labels.append(text)
+            elif lower.startswith("heating"):
+                labels.append(text)
+            elif lower.endswith("duration ended"):
+                labels.append(text.replace(" duration ended", " ended"))
+            else:
+                labels.append(text)
+        return "\n".join(labels)
 
     @staticmethod
     def finite_values(values):

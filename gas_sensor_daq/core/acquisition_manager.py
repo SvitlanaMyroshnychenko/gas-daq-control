@@ -281,7 +281,7 @@ class AcquisitionManager(QObject):
 
     def set_humidity(self, enabled, duration_ms=0):
         if not self.safe_command("Set humidity failed", self.mfc.set_humidity, enabled):
-            return
+            return False
 
         token = self.next_control_timer_token("humidity")
         state = "ON" if enabled else "OFF"
@@ -290,6 +290,7 @@ class AcquisitionManager(QObject):
 
         if enabled and duration_ms > 0:
             QTimer.singleShot(duration_ms, lambda token=token: self.expire_humidity(token))
+        return True
 
     def expire_humidity(self, timer_token):
         if self.control_timer_is_current("humidity", timer_token):
@@ -297,7 +298,7 @@ class AcquisitionManager(QObject):
 
     def set_heating(self, enabled, duration_ms=0):
         if not self.safe_command("Set heating failed", self.mfc.set_heating, enabled):
-            return
+            return False
 
         token = self.next_control_timer_token("heating")
         state = "ON" if enabled else "OFF"
@@ -306,6 +307,7 @@ class AcquisitionManager(QObject):
 
         if enabled and duration_ms > 0:
             QTimer.singleShot(duration_ms, lambda token=token: self.expire_heating(token))
+        return True
 
     def expire_heating(self, timer_token):
         if self.control_timer_is_current("heating", timer_token):
