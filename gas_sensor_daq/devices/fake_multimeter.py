@@ -7,7 +7,6 @@ from gas_sensor_daq.models.records import MeasurementRecord
 
 class FakeMultimeter:
     def __init__(self):
-        self.temperature_c = 25.0
         self.reset_time()
 
     def reset_time(self):
@@ -18,7 +17,7 @@ class FakeMultimeter:
         sensor_state = control_state.to_sensor_state()
 
         # The fake response is intentionally simple but directional: NH3 and
-        # humidity lower resistance, heating raises temperature and resistance.
+        # humidity lowers resistance, and heating raises resistance.
         baseline = 10000
 
         gas_effect = 0
@@ -40,15 +39,10 @@ class FakeMultimeter:
             + noise
         )
 
-        target_temperature = 40 if sensor_state["heating_on"] else 25
-        self.temperature_c += (target_temperature - self.temperature_c) * 0.18
-        temperature = self.temperature_c + random.uniform(-0.25, 0.25)
-
         return MeasurementRecord(
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             elapsed_s=elapsed,
             resistance_ohm=resistance,
-            temperature_c=temperature,
             nh3_flow_sccm=control_state.nh3_flow_sccm,
             air_flow_sccm=control_state.air_flow_sccm,
             humidity_on=control_state.humidity_on,
@@ -67,6 +61,7 @@ class FakeMultimeter:
             mfc_capacity_unit=control_state.mfc_capacity_unit,
             mfc_temperature_c=control_state.mfc_temperature_c,
             mfc_alarm_info=control_state.mfc_alarm_info,
+            mfc_channels=control_state.mfc_channels,
         )
 
     def close(self):

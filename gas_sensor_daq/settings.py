@@ -3,6 +3,22 @@ import os
 
 
 @dataclass(frozen=True)
+class MFCNodeConfig:
+    address: int
+    serial: str
+
+
+EXPECTED_MFC_NODES = (
+    MFCNodeConfig(address=1, serial="M25217902C"),
+    MFCNodeConfig(address=2, serial="M25217902A"),
+    MFCNodeConfig(address=3, serial="M25217902B"),
+    MFCNodeConfig(address=4, serial="M25217902E"),
+    MFCNodeConfig(address=5, serial="M25217902F"),
+    MFCNodeConfig(address=6, serial="M25217902D"),
+)
+
+
+@dataclass(frozen=True)
 class DeviceSettings:
     mode: str = "simulation"
     multimeter_mode: str = "simulation"
@@ -11,6 +27,7 @@ class DeviceSettings:
     mfc_port: str = "COM3"
     mfc_baudrate: int = 38400
     mfc_address: int | None = None
+    mfc_nodes: tuple[MFCNodeConfig, ...] = EXPECTED_MFC_NODES
     multimeter_resource: str = ""
     default_air_flow_sccm: float = 100.0
     data_directory: str = "data"

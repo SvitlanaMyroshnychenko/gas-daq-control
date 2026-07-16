@@ -1,6 +1,6 @@
 from gas_sensor_daq.devices.fake_mfc import FakeMFC
 from gas_sensor_daq.devices.fake_multimeter import FakeMultimeter
-from gas_sensor_daq.devices.propar_mfc_controller import ProparMFCController
+from gas_sensor_daq.devices.propar_mfc_rack import ProparMFCRack
 from gas_sensor_daq.devices.scpi_resistance_multimeter import ScpiResistanceMultimeter
 from gas_sensor_daq.settings import DeviceSettings
 
@@ -32,17 +32,19 @@ def create_mfc(settings: DeviceSettings, mode=None, port=None, address=None):
     mode = (mode or settings.mfc_mode).lower().strip()
 
     if mode == "simulation":
-        return FakeMFC(default_air_flow_sccm=settings.default_air_flow_sccm)
+        return FakeMFC(
+            default_air_flow_sccm=settings.default_air_flow_sccm,
+            nodes=settings.mfc_nodes,
+        )
 
     if mode == "real":
-        selected_address = (
-            settings.mfc_address if address is None else address
-        )
-        return ProparMFCController(
+        # The rack is one shared propar bus. `address` remains accepted only
+        # for backwards-compatible callers; real operation always verifies all
+        # configured node addresses and serial numbers.
+        return ProparMFCRack(
             port or settings.mfc_port,
             baudrate=settings.mfc_baudrate,
-            address=selected_address,
-            default_air_flow_sccm=settings.default_air_flow_sccm,
+            expected_nodes=settings.mfc_nodes,
         )
 
     raise ValueError(f"Unsupported MFC mode: {settings.mfc_mode}")

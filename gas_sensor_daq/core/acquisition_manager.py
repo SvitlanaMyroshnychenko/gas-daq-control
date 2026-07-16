@@ -6,6 +6,7 @@ import time
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from gas_sensor_daq.devices.factory import create_devices, create_mfc, create_multimeter
+from gas_sensor_daq.devices.propar_mfc_rack import ProparMFCRack
 from gas_sensor_daq.logging.data_logger import CSVLogger, ExcelLogger
 from gas_sensor_daq.models.records import MeasurementRecord
 from gas_sensor_daq.settings import DEFAULT_SETTINGS
@@ -27,6 +28,7 @@ class AcquisitionManager(QObject):
     device_error = Signal(str)
     multimeter_changed = Signal(str, str)
     mfc_changed = Signal(str, str)
+    recipe_step_changed = Signal(int)
 
     def __init__(self, parent=None, settings=DEFAULT_SETTINGS):
         super().__init__(parent)
@@ -38,6 +40,7 @@ class AcquisitionManager(QObject):
         self.mfc_port = settings.mfc_port
         self.mfc_address = settings.mfc_address
         self.data_directory = settings.data_directory
+        self.acquisition_interval_ms = settings.acquisition_interval_ms
         self.logger = None
         self.pending_events = []
         self.experiment_start_time = None
@@ -52,6 +55,19 @@ class AcquisitionManager(QObject):
 
         self.elapsed_timer = QTimer(self)
         self.elapsed_timer.timeout.connect(self.update_elapsed_time)
+
+        self.recipe_steps = ()
+        self.recipe_step_index = -1
+        self.recipe_timer = QTimer(self)
+        self.recipe_timer.setSingleShot(True)
+        self.recipe_timer.timeout.connect(self.advance_simulated_recipe)
+
+    def set_acquisition_rate_hz(self, rate_hz):
+        if self.acquisition_timer.isActive():
+            raise RuntimeError("Stop the experiment before changing the acquisition rate.")
+        if rate_hz <= 0:
+            raise ValueError("Acquisition rate must be greater than zero.")
+        self.acquisition_interval_ms = max(1, round(1000 / rate_hz))
 
     def current_state(self):
         try:
@@ -139,7 +155,14 @@ class AcquisitionManager(QObject):
 
         return "MFC controller: simulated"
 
-    def start_experiment(self, save_format, data_directory=None):
+    def discover_mfc_racks(self):
+        """Probe serial ports without sending any MFC control commands."""
+        return ProparMFCRack.discover_serial_ports(
+            baudrate=self.settings.mfc_baudrate,
+            expected_nodes=self.settings.mfc_nodes,
+        )
+
+    def start_experiment(self, save_format, data_directory=None, filename_stem="experiment"):
         try:
             # Every Start creates a fresh experiment file. Resume/append would
             # need explicit metadata handling and is intentionally not implicit.
@@ -149,8 +172,9 @@ class AcquisitionManager(QObject):
             self.data_directory = data_directory or self.data_directory
             os.makedirs(self.data_directory, exist_ok=True)
 
+            stem = self.sanitize_filename_stem(filename_stem)
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            base_filename = f"experiment_{timestamp}"
+            base_filename = f"{stem}_{timestamp}"
             if save_format == "CSV":
                 filename = os.path.join(self.data_directory, f"{base_filename}.csv")
                 self.logger = CSVLogger(filename)
@@ -158,7 +182,7 @@ class AcquisitionManager(QObject):
                 filename = os.path.join(self.data_directory, f"{base_filename}.xlsx")
                 self.logger = ExcelLogger(filename)
 
-            self.acquisition_timer.start(self.settings.acquisition_interval_ms)
+            self.acquisition_timer.start(self.acquisition_interval_ms)
             self.elapsed_timer.start(1000)
             self.experiment_started.emit(filename)
             self.elapsed_changed.emit("00:00:00")
@@ -166,10 +190,120 @@ class AcquisitionManager(QObject):
             self.handle_device_error("Experiment start failed", exc)
             self.stop_experiment("Experiment start failed")
 
+    def start_simulated_recipe(self, steps):
+        if self.mfc_mode != "simulation":
+            return False
+        if not steps:
+            return False
+
+        try:
+            self.validate_simulated_recipe(steps)
+        except ValueError as exc:
+            self.handle_device_error("Simulated experiment validation failed", exc)
+            return False
+
+        self.stop_recipe_execution()
+        self.recipe_steps = tuple(steps)
+        self.recipe_step_index = 0
+        self.apply_current_recipe_step()
+        return True
+
+    def validate_simulated_recipe(self, steps):
+        capacities = getattr(self.mfc, "channel_capacities", {})
+        for step_index, step in enumerate(steps, start=1):
+            setpoints = step.get("setpoints", {})
+            channel_total = 0.0
+            for channel_index in range(1, 7):
+                try:
+                    value = float(setpoints[channel_index])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Step {step_index} is missing a valid MFC {channel_index} setpoint."
+                    ) from exc
+                capacity = float(capacities.get(channel_index, 0.0))
+                if value < 0 or value > capacity:
+                    raise ValueError(
+                        f"Step {step_index} MFC {channel_index} must be between "
+                        f"0 and {capacity:g} sccm."
+                    )
+                channel_total += value
+
+            total_setpoint = float(step.get("total_setpoint_mln_min", math.nan))
+            total_capacity = sum(float(value) for value in capacities.values())
+            if total_setpoint > total_capacity:
+                raise ValueError(
+                    f"Step {step_index} step total exceeds the {total_capacity:g} mln/min rack capacity."
+                )
+            if not math.isfinite(total_setpoint) or not math.isclose(
+                total_setpoint, channel_total, rel_tol=0, abs_tol=0.01
+            ):
+                raise ValueError(
+                    f"Step {step_index} step total must equal the sum of MFC setpoints."
+                )
+
+    def mfc_channel_capacity_sccm(self, channel_index):
+        capacities = getattr(self.mfc, "channel_capacities", {})
+        return float(capacities.get(channel_index, 0.0))
+
+    def apply_current_recipe_step(self):
+        if not 0 <= self.recipe_step_index < len(self.recipe_steps):
+            return
+
+        step = self.recipe_steps[self.recipe_step_index]
+        try:
+            self.mfc.set_channel_setpoints(step["setpoints"])
+        except Exception as exc:
+            self.handle_device_error("Apply simulated experiment step failed", exc)
+            self.stop_experiment("Stopped: experiment step could not be applied")
+            return
+
+        self.set_event(
+            f"Experiment step {self.recipe_step_index + 1}/{len(self.recipe_steps)}: "
+            f"step total {step['total_setpoint_mln_min']:g} mln/min"
+        )
+        self.emit_state_changed()
+        self.recipe_step_changed.emit(self.recipe_step_index)
+        self.recipe_timer.start(step["duration_ms"])
+
+    def advance_simulated_recipe(self):
+        self.recipe_step_index += 1
+        if self.recipe_step_index < len(self.recipe_steps):
+            self.apply_current_recipe_step()
+            return
+
+        try:
+            self.mfc.set_channel_setpoints({index: 0.0 for index in range(1, 7)})
+        except Exception as exc:
+            self.handle_device_error("Reset simulated experiment flows failed", exc)
+            return
+
+        self.set_event("Experiment completed; simulated MFC setpoints reset to zero")
+        self.emit_state_changed()
+        self.recipe_step_changed.emit(-1)
+
+    def stop_recipe_execution(self):
+        self.recipe_timer.stop()
+        self.recipe_steps = ()
+        self.recipe_step_index = -1
+
+    @staticmethod
+    def sanitize_filename_stem(filename_stem):
+        stem = str(filename_stem or "").strip().rstrip(". ")
+        if not stem:
+            return "experiment"
+
+        invalid_characters = '<>:"/\\|?*'
+        sanitized = "".join(
+            "_" if character in invalid_characters else character
+            for character in stem
+        ).strip()
+        return sanitized or "experiment"
+
     def stop_experiment(self, message="Experiment finished"):
         self.acquisition_timer.stop()
         self.elapsed_timer.stop()
         self.invalidate_control_timers()
+        self.stop_recipe_execution()
 
         self.safe_shutdown_controls()
 
@@ -191,7 +325,12 @@ class AcquisitionManager(QObject):
 
         try:
             shutdown()
-            self.emit_state_changed()
+            state = self.current_state()
+            if self.mfc_mode == "simulation":
+                channels = getattr(state, "mfc_channels", ())
+                if any(channel.setpoint_sccm != 0 for channel in channels):
+                    raise RuntimeError("Simulated MFC setpoints did not reset to zero.")
+            self.state_changed.emit(state)
         except Exception as exc:
             self.handle_device_error("Safe shutdown failed", exc)
 
@@ -199,6 +338,8 @@ class AcquisitionManager(QObject):
         self.acquisition_timer.stop()
         self.elapsed_timer.stop()
         self.invalidate_control_timers()
+        self.stop_recipe_execution()
+        self.safe_shutdown_controls()
 
         if self.logger is not None:
             try:
@@ -353,6 +494,7 @@ class AcquisitionManager(QObject):
         record.event = event
         # Events are one-shot annotations. The next row should be blank unless
         # another user action or device error occurs.
+        self.state_changed.emit(state)
         self.data_acquired.emit(record.to_dict(), event)
 
     def emit_state_changed(self):
@@ -404,7 +546,6 @@ class AcquisitionManager(QObject):
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             elapsed_s=elapsed,
             resistance_ohm=math.nan,
-            temperature_c=math.nan,
             nh3_flow_sccm=state.nh3_flow_sccm if state is not None else math.nan,
             air_flow_sccm=state.air_flow_sccm if state is not None else math.nan,
             humidity_on=state.humidity_on if state is not None else False,
@@ -424,6 +565,7 @@ class AcquisitionManager(QObject):
             mfc_capacity_unit=state.mfc_capacity_unit if state is not None else "",
             mfc_temperature_c=state.mfc_temperature_c if state is not None else math.nan,
             mfc_alarm_info=state.mfc_alarm_info if state is not None else "",
+            mfc_channels=state.mfc_channels if state is not None else (),
         )
 
         try:

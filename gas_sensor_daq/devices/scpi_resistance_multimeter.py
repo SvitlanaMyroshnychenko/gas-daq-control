@@ -56,7 +56,6 @@ class ScpiResistanceMultimeter:
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             elapsed_s=elapsed,
             resistance_ohm=resistance_for_plot,
-            temperature_c=math.nan,
             nh3_flow_sccm=control_state.nh3_flow_sccm,
             air_flow_sccm=control_state.air_flow_sccm,
             humidity_on=control_state.humidity_on,
@@ -75,6 +74,7 @@ class ScpiResistanceMultimeter:
             mfc_capacity_unit=control_state.mfc_capacity_unit,
             mfc_temperature_c=control_state.mfc_temperature_c,
             mfc_alarm_info=control_state.mfc_alarm_info,
+            mfc_channels=control_state.mfc_channels,
         )
 
     def close(self):
