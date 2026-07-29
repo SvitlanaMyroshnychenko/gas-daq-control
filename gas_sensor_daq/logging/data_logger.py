@@ -1,4 +1,5 @@
 import csv
+import json
 import os
 
 from openpyxl import Workbook
@@ -21,11 +22,18 @@ def row_for_file(record):
 
 
 class CSVLogger:
-    def __init__(self, filename):
+    def __init__(self, filename, metadata=None):
         os.makedirs(os.path.dirname(filename) or "data", exist_ok=True)
+        self.filename = filename
         self.file = open(filename, "w", newline="")
         self.writer = csv.DictWriter(self.file, fieldnames=FIELDNAMES)
         self.writer.writeheader()
+        self._write_metadata(metadata or {})
+
+    def _write_metadata(self, metadata):
+        metadata_filename = f"{os.path.splitext(self.filename)[0]}.metadata.json"
+        with open(metadata_filename, "w", encoding="utf-8") as metadata_file:
+            json.dump(metadata, metadata_file, ensure_ascii=False, indent=2)
 
     def write(self, record):
         # FIELDNAMES controls column order and filters accidental extra keys.
@@ -37,13 +45,16 @@ class CSVLogger:
 
 
 class ExcelLogger:
-    def __init__(self, filename):
+    def __init__(self, filename, metadata=None):
         os.makedirs(os.path.dirname(filename) or "data", exist_ok=True)
         self.filename = filename
         self.workbook = Workbook()
         self.sheet = self.workbook.active
         self.sheet.title = "Data"
         self.sheet.append(FIELDNAMES)
+        self.metadata_sheet = self.workbook.create_sheet("Metadata")
+        for key, value in (metadata or {}).items():
+            self.metadata_sheet.append([key, json.dumps(value, ensure_ascii=False)])
 
     def write(self, record):
         row = row_for_file(record)

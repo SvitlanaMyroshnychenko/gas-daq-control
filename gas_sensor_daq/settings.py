@@ -6,15 +6,17 @@ import os
 class MFCNodeConfig:
     address: int
     serial: str
+    capacity_mln_min: float
+    gas_name: str
 
 
 EXPECTED_MFC_NODES = (
-    MFCNodeConfig(address=1, serial="M25217902C"),
-    MFCNodeConfig(address=2, serial="M25217902A"),
-    MFCNodeConfig(address=3, serial="M25217902B"),
-    MFCNodeConfig(address=4, serial="M25217902E"),
-    MFCNodeConfig(address=5, serial="M25217902F"),
-    MFCNodeConfig(address=6, serial="M25217902D"),
+    MFCNodeConfig(address=1, serial="M25217902C", capacity_mln_min=10.0, gas_name="Gas 1"),
+    MFCNodeConfig(address=2, serial="M25217902A", capacity_mln_min=10.0, gas_name="Gas 2"),
+    MFCNodeConfig(address=3, serial="M25217902B", capacity_mln_min=10.0, gas_name="Gas 3"),
+    MFCNodeConfig(address=4, serial="M25217902E", capacity_mln_min=200.0, gas_name="Humid air"),
+    MFCNodeConfig(address=5, serial="M25217902F", capacity_mln_min=200.0, gas_name="Dry air"),
+    MFCNodeConfig(address=6, serial="M25217902D", capacity_mln_min=30.0, gas_name="Dry air"),
 )
 
 

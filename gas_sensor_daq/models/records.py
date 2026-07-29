@@ -9,45 +9,23 @@ def mfc_channel_fieldnames():
     for index in range(1, MFC_CHANNEL_COUNT + 1):
         prefix = f"mfc{index}_"
         fields.extend([
-            f"{prefix}address",
-            f"{prefix}serial",
-            f"{prefix}fluid",
-            f"{prefix}capacity_sccm",
-            f"{prefix}capacity_unit",
-            f"{prefix}setpoint_sccm",
-            f"{prefix}actual_sccm",
-            f"{prefix}temperature_c",
-            f"{prefix}alarm_info",
-            f"{prefix}status",
+            f"{prefix}setpoint_mln_min",
+            f"{prefix}actual_mln_min",
         ])
     return fields
 
 
 FIELDNAMES = [
-    # This list is the logging contract. Add new columns here first, then make
-    # sure MeasurementRecord fills them for both simulated and real devices.
+    # This is the compact, per-sample logging contract. Static MFC identity and
+    # capacity details live once in the adjacent metadata JSON file.
     "timestamp",
     "elapsed_s",
-    "resistance_ohm",
-    "nh3_flow_sccm",
-    "air_flow_sccm",
-    "humidity_on",
-    "heating_on",
+    "step_number",
     "event",
-    "nh3_setpoint_sccm",
-    "nh3_actual_sccm",
-    "air_setpoint_sccm",
-    "air_actual_sccm",
-    "multimeter_status",
-    "mfc_status",
-    "mfc_port",
-    "mfc_address",
-    "mfc_serial",
-    "mfc_fluid",
-    "mfc_capacity_sccm",
-    "mfc_capacity_unit",
-    "mfc_temperature_c",
-    "mfc_alarm_info",
+    "resistance_ohm",
+    "total_setpoint_mln_min",
+    "total_actual_mln_min",
+    "measurement_status",
     *mfc_channel_fieldnames(),
 ]
 
@@ -84,11 +62,13 @@ class MFCChannelState:
         }
 
 
-def mfc_channel_log_fields(channels):
+def mfc_channel_export_fields(channels):
     fields = {field: "" for field in mfc_channel_fieldnames()}
     for channel in channels:
         if 1 <= channel.index <= MFC_CHANNEL_COUNT:
-            fields.update(channel.to_log_fields())
+            prefix = f"mfc{channel.index}_"
+            fields[f"{prefix}setpoint_mln_min"] = channel.setpoint_sccm
+            fields[f"{prefix}actual_mln_min"] = channel.actual_sccm
     return fields
 
 
@@ -135,7 +115,11 @@ class ControlState:
         return data | {
             "nh3_flow_sccm": self.nh3_flow_sccm,
             "air_flow_sccm": self.air_flow_sccm,
-        } | mfc_channel_log_fields(self.mfc_channels)
+        } | {
+            channel_key: value
+            for channel in self.mfc_channels
+            for channel_key, value in channel.to_log_fields().items()
+        }
 
 
 @dataclass
@@ -165,8 +149,18 @@ class MeasurementRecord:
     mfc_temperature_c: float = 0.0
     mfc_alarm_info: str = ""
     mfc_channels: tuple[MFCChannelState, ...] = ()
+    step_number: int | None = None
+    total_setpoint_mln_min: float = 0.0
+    total_actual_mln_min: float = 0.0
 
     def to_dict(self):
         data = asdict(self)
         data.pop("mfc_channels", None)
-        return data | mfc_channel_log_fields(self.mfc_channels)
+        legacy_channel_fields = {
+            channel_key: value
+            for channel in self.mfc_channels
+            for channel_key, value in channel.to_log_fields().items()
+        }
+        return data | legacy_channel_fields | mfc_channel_export_fields(self.mfc_channels) | {
+            "measurement_status": self.multimeter_status,
+        }

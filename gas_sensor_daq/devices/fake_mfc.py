@@ -15,7 +15,8 @@ class FakeMFC:
         self.channel_setpoints = {index: 0.0 for index in range(1, 7)}
         self.channel_actuals = {index: 0.0 for index in range(1, 7)}
         self.channel_capacities = {
-            index: self.CHANNEL_CAPACITY_SCCM for index in range(1, 7)
+            index: float(getattr(node, "capacity_mln_min", self.CHANNEL_CAPACITY_SCCM))
+            for index, node in enumerate(self.nodes, start=1)
         }
         self.state = ControlState(
             air_setpoint_sccm=float(default_air_flow_sccm),

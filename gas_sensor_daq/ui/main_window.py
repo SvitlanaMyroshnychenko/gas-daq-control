@@ -36,14 +36,23 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 from gas_sensor_daq.core.acquisition_manager import AcquisitionManager
+from gas_sensor_daq.core.experiment_design import (
+    DEFAULT_TARGET_TOTAL_FLOW,
+    flow_matches_target,
+    parse_duration_seconds,
+    rack_capacity,
+)
 from gas_sensor_daq.devices.visa_discovery import discover_visa_instruments
 from gas_sensor_daq.ui.recipe_table import (
     add_recipe_step,
     clear_recipe_steps,
     configure_recipe_table,
     duplicate_recipe_step,
+    recipe_event,
     remove_recipe_step,
     set_recipe_editable,
+    set_recipe_event,
+    style_recipe_total_item,
 )
 
 try:
@@ -429,7 +438,7 @@ class MainWindow(QMainWindow):
         self.recipe_table.setHorizontalHeaderLabels([
             "Step",
             "Step Total\n(mln/min)",
-            "Duration\n(min)",
+            "Duration\n(s / min)",
             "MFC 1\n(mln/min)",
             "MFC 2\n(mln/min)",
             "MFC 3\n(mln/min)",
@@ -439,7 +448,7 @@ class MainWindow(QMainWindow):
         ])
         configure_recipe_table(self.recipe_table)
         # Keep the schedule compact at five visible steps; additional steps scroll.
-        self.recipe_table.setFixedHeight(184)
+        self.recipe_table.setFixedHeight(174)
         self.recipe_table.itemChanged.connect(self.update_recipe_total)
         self.recipe_table.itemChanged.connect(self.validate_recipe_live)
         self.recipe_table.itemChanged.connect(self.update_experiment_status)
@@ -452,8 +461,62 @@ class MainWindow(QMainWindow):
         self.recipe_duplicate_button.setObjectName("recipeDuplicateButton")
         self.recipe_remove_button.setObjectName("recipeRemoveButton")
         self.recipe_clear_button.setObjectName("recipeClearButton")
-        self.recipe_max_total_label = QLabel("Rack capacity: --")
-        self.recipe_max_total_label.setObjectName("recipeMaxTotal")
+        self.recipe_event_input = QLineEdit()
+        self.recipe_event_input.setObjectName("recipeEventInput")
+        self.recipe_event_input.setPlaceholderText("Event for selected step")
+        self.recipe_event_input.setFixedWidth(250)
+        self.recipe_event_input.setFixedHeight(28)
+        self.recipe_event_input.setToolTip(
+            "Event recorded in the log when the selected step begins."
+        )
+        self.recipe_event_input.editingFinished.connect(self.commit_recipe_event)
+        self.recipe_rh_input = self.recipe_mixture_input(0.0, 100.0, 0.0)
+        self.recipe_rh_input.setSuffix(" %")
+        self.recipe_gas_inputs = {
+            index: self.recipe_mixture_input(
+                0.0,
+                self.manager.mfc_channel_capacity_sccm(index),
+                0.0,
+            )
+            for index in range(1, 4)
+        }
+        self.recipe_dry_mfc5_input = self.recipe_mixture_input(
+            0.0,
+            self.manager.mfc_channel_capacity_sccm(5),
+            0.0,
+        )
+        self.recipe_mfc6_remainder_label = QLabel("0.0 mln/min")
+        self.recipe_mfc6_remainder_label.setObjectName("recipeMixtureValue")
+        self.recipe_mfc6_remainder_label.setMinimumWidth(76)
+        self.recipe_apply_mixture_button = QPushButton("Calculate mixture")
+        self.recipe_apply_mixture_button.setObjectName("recipeMixtureButton")
+        self.recipe_apply_mixture_button.setFixedHeight(28)
+        self.recipe_apply_mixture_button.clicked.connect(self.apply_recipe_mixture)
+        self.recipe_mixture_inputs = (
+            self.recipe_rh_input,
+            *self.recipe_gas_inputs.values(),
+            self.recipe_dry_mfc5_input,
+        )
+        for input_widget in self.recipe_mixture_inputs:
+            input_widget.valueChanged.connect(self.update_recipe_mfc6_remainder)
+        self.recipe_target_total_label = QLabel("Target total")
+        self.recipe_target_total_label.setObjectName("recipeMaxTotal")
+        self.recipe_target_total_input = QDoubleSpinBox()
+        self.recipe_target_total_input.setObjectName("recipeTargetTotal")
+        self.recipe_target_total_input.setRange(
+            0.1,
+            rack_capacity(self.manager.settings.mfc_nodes),
+        )
+        self.recipe_target_total_input.setDecimals(1)
+        self.recipe_target_total_input.setSingleStep(5.0)
+        self.recipe_target_total_input.setValue(DEFAULT_TARGET_TOTAL_FLOW)
+        self.recipe_target_total_input.setFixedWidth(74)
+        self.recipe_target_total_input.setFixedHeight(22)
+        self.recipe_target_total_input.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.recipe_target_total_input.valueChanged.connect(self.validate_recipe_live)
+        self.recipe_target_total_input.valueChanged.connect(self.update_recipe_mfc6_remainder)
+        self.recipe_target_total_unit_label = QLabel("mln/min")
+        self.recipe_target_total_unit_label.setObjectName("recipeTargetUnit")
         self.recipe_issues_label = QLabel()
         self.recipe_issues_label.setObjectName("recipeIssues")
         self.recipe_issues_label.hide()
@@ -473,6 +536,9 @@ class MainWindow(QMainWindow):
             lambda: remove_recipe_step(self.recipe_table)
         )
         self.recipe_clear_button.clicked.connect(self.clear_recipe_schedule)
+        self.recipe_table.itemSelectionChanged.connect(self.on_recipe_selection_changed)
+        self.recipe_table.selectRow(0)
+        self.on_recipe_selection_changed()
 
         root = QWidget()
         root.setObjectName("appBackground")
@@ -486,7 +552,7 @@ class MainWindow(QMainWindow):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(8)
         body_layout.addWidget(self.scroll_panel(self.create_left_panel()), 0)
-        body_layout.addWidget(self.create_center_panel(), 1)
+        body_layout.addWidget(self.scroll_panel(self.create_center_panel()), 1)
         body_layout.addWidget(self.scroll_panel(self.create_right_panel()), 0)
 
         root_layout.addLayout(body_layout, 1)
@@ -1026,28 +1092,88 @@ class MainWindow(QMainWindow):
 
         recipe_layout = QVBoxLayout()
         recipe_layout.setContentsMargins(0, 3, 0, 0)
-        recipe_layout.setSpacing(0)
+        recipe_layout.setSpacing(8)
         recipe_layout.addWidget(self.recipe_table)
 
         recipe_actions = QWidget()
-        recipe_actions_layout = QHBoxLayout()
+        recipe_actions_layout = QVBoxLayout()
         recipe_actions_layout.setContentsMargins(0, 0, 0, 0)
         recipe_actions_layout.setSpacing(5)
-        recipe_actions_layout.addWidget(self.recipe_max_total_label)
-        recipe_actions_layout.addWidget(self.recipe_issues_label)
-        recipe_actions_layout.addSpacing(8)
+        recipe_event_actions = QHBoxLayout()
+        recipe_event_actions.setContentsMargins(0, 0, 0, 0)
+        recipe_event_actions.setSpacing(5)
+        recipe_event_actions.addWidget(QLabel("Event"))
+        recipe_event_actions.addWidget(self.recipe_event_input)
+        recipe_event_actions.addStretch()
         for button in self.recipe_action_buttons:
-            recipe_actions_layout.addWidget(button)
+            recipe_event_actions.addWidget(button)
+        recipe_actions_layout.addLayout(recipe_event_actions)
+
+        recipe_mixture_layout = QVBoxLayout()
+        recipe_mixture_layout.setContentsMargins(0, 0, 0, 0)
+        recipe_mixture_layout.setSpacing(4)
+        mixture_primary_row = QHBoxLayout()
+        mixture_primary_row.setContentsMargins(0, 0, 0, 0)
+        mixture_primary_row.setSpacing(6)
+        mixture_title = QLabel("Selected-step mixture")
+        mixture_title.setObjectName("recipeMixtureTitle")
+        mixture_primary_row.addWidget(mixture_title)
+        for label, widget in (
+            ("RH", self.recipe_rh_input),
+            ("Gas 1", self.recipe_gas_inputs[1]),
+            ("Gas 2", self.recipe_gas_inputs[2]),
+            ("Gas 3", self.recipe_gas_inputs[3]),
+        ):
+            mixture_primary_row.addWidget(QLabel(label))
+            mixture_primary_row.addWidget(widget)
+        mixture_primary_row.addStretch()
+
+        mixture_dry_air_row = QHBoxLayout()
+        mixture_dry_air_row.setContentsMargins(0, 0, 0, 0)
+        mixture_dry_air_row.setSpacing(6)
+        dry_air_title = QLabel("Dry-air allocation")
+        dry_air_title.setObjectName("recipeMixtureTitle")
+        mixture_dry_air_row.addWidget(dry_air_title)
+        mixture_dry_air_row.addWidget(QLabel("MFC5 dry"))
+        mixture_dry_air_row.addWidget(self.recipe_dry_mfc5_input)
+        mixture_dry_air_row.addWidget(QLabel("MFC6 remainder"))
+        mixture_dry_air_row.addWidget(self.recipe_mfc6_remainder_label)
+        mixture_dry_air_row.addStretch()
+        mixture_dry_air_row.addWidget(self.recipe_apply_mixture_button)
+        recipe_mixture_layout.addLayout(mixture_primary_row)
+        recipe_mixture_layout.addLayout(mixture_dry_air_row)
+        recipe_actions_layout.addLayout(recipe_mixture_layout)
         recipe_actions.setLayout(recipe_actions_layout)
+        recipe_layout.addWidget(recipe_actions)
+
+        recipe_target_control = QWidget()
+        recipe_target_control_layout = QHBoxLayout()
+        recipe_target_control_layout.setContentsMargins(0, 0, 0, 0)
+        recipe_target_control_layout.setSpacing(4)
+        recipe_target_control_layout.addWidget(self.recipe_target_total_input)
+        recipe_target_control_layout.addWidget(self.recipe_target_total_unit_label)
+        recipe_target_control.setLayout(recipe_target_control_layout)
+
+        recipe_header_controls = QWidget()
+        recipe_header_controls_layout = QHBoxLayout()
+        recipe_header_controls_layout.setContentsMargins(0, 0, 0, 0)
+        recipe_header_controls_layout.setSpacing(5)
+        recipe_header_controls_layout.addWidget(self.recipe_issues_label)
+        recipe_header_controls_layout.addSpacing(16)
+        recipe_header_controls_layout.addWidget(self.recipe_target_total_label)
+        recipe_header_controls_layout.addWidget(recipe_target_control)
+        recipe_header_controls.setLayout(recipe_header_controls_layout)
 
         recipe_card = self.section_card(
             "Experiment Schedule",
             None,
             recipe_layout,
             expanding=False,
-            header_widget=recipe_actions,
+            header_widget=recipe_header_controls,
         )
-        recipe_card.setFixedHeight(230)
+        # Let the card account for both the five-row table and its bottom
+        # action row. A fixed height clips them at non-100% display scaling.
+        recipe_card.setMinimumHeight(352)
 
         layout.addWidget(plot_card, 4)
         layout.addWidget(recipe_card)
@@ -1085,6 +1211,7 @@ class MainWindow(QMainWindow):
         )
 
         layout.addWidget(devices_card, 0, Qt.AlignTop)
+        layout.addWidget(self.create_manual_mfc_test_card(), 0, Qt.AlignTop)
         layout.addWidget(self.create_experiment_status_card(), 0, Qt.AlignTop)
         layout.addStretch()
         panel.setLayout(layout)
@@ -1102,18 +1229,85 @@ class MainWindow(QMainWindow):
         self.experiment_total_time_value = self.experiment_status_value(
             "--", "experimentTimeValue"
         )
-        self.experiment_state_value = self.experiment_status_value(
-            "Idle", "experimentStateBadge"
-        )
 
         content.addWidget(self.state_row("Step", self.experiment_step_value))
         content.addWidget(self.state_row("Remaining", self.experiment_remaining_value))
         content.addWidget(self.state_row("Total time", self.experiment_total_time_value))
-        content.addWidget(self.state_row("State", self.experiment_state_value))
 
         return self.compact_section_card(
             "Experiment Status", content, title_accent="#2563eb"
         )
+
+    def create_manual_mfc_test_card(self):
+        content = QVBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(6)
+
+        self.manual_mfc_channel_selector = QComboBox()
+        for index in range(1, 7):
+            self.manual_mfc_channel_selector.addItem(f"MFC {index}", index)
+        self.manual_mfc_channel_selector.setObjectName("manualMfcChannel")
+        self.manual_mfc_channel_selector.currentIndexChanged.connect(
+            self.update_manual_mfc_test_limit
+        )
+
+        self.manual_mfc_flow_input = QDoubleSpinBox()
+        self.manual_mfc_flow_input.setObjectName("manualMfcFlow")
+        self.manual_mfc_flow_input.setDecimals(2)
+        self.manual_mfc_flow_input.setSingleStep(0.1)
+        self.manual_mfc_flow_input.setValue(1.0)
+
+        self.manual_mfc_apply_button = QPushButton("Apply test flow")
+        self.manual_mfc_apply_button.setObjectName("manualMfcApplyButton")
+        self.manual_mfc_apply_button.clicked.connect(self.apply_manual_mfc_test)
+        self.manual_mfc_zero_button = QPushButton("Zero all MFCs")
+        self.manual_mfc_zero_button.setObjectName("manualMfcZeroButton")
+        self.manual_mfc_zero_button.clicked.connect(self.confirm_zero_all_mfcs)
+
+        channel_row = QHBoxLayout()
+        channel_row.setContentsMargins(0, 0, 0, 0)
+        channel_row.setSpacing(6)
+        channel_label = QLabel("Channel")
+        channel_label.setObjectName("manualMfcLabel")
+        channel_row.addWidget(channel_label)
+        channel_row.addWidget(self.manual_mfc_channel_selector, 1)
+
+        flow_row = QHBoxLayout()
+        flow_row.setContentsMargins(0, 0, 0, 0)
+        flow_row.setSpacing(6)
+        flow_label = QLabel("Test flow")
+        flow_label.setObjectName("manualMfcLabel")
+        flow_unit = QLabel("mln/min")
+        flow_unit.setObjectName("manualMfcUnit")
+        flow_row.addWidget(flow_label)
+        flow_row.addWidget(self.manual_mfc_flow_input, 1)
+        flow_row.addWidget(flow_unit)
+
+        self.manual_mfc_test_state = QLabel(
+            "Connect a verified real rack to enable manual testing."
+        )
+        self.manual_mfc_test_state.setObjectName("manualMfcHint")
+        self.manual_mfc_test_state.setWordWrap(True)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 2, 0, 0)
+        actions.setSpacing(6)
+        actions.addWidget(self.manual_mfc_apply_button, 1)
+        actions.addWidget(self.manual_mfc_zero_button, 1)
+
+        content.addLayout(channel_row)
+        content.addLayout(flow_row)
+        content.addWidget(self.manual_mfc_test_state)
+        content.addLayout(actions)
+
+        card = self.compact_section_card(
+            "Manual MFC Test", content, title_accent="#d97706"
+        )
+        card.setObjectName("manualMfcTestCard")
+        self.manual_mfc_test_card = card
+        self.update_manual_mfc_test_limit()
+        self.update_manual_mfc_test_controls()
+        return card
 
     @staticmethod
     def experiment_status_value(text, object_name="experimentStatusValue"):
@@ -1480,10 +1674,10 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 7, 8, 7)
         layout.setSpacing(8)
 
-        dot = QLabel()
-        dot.setObjectName("compactDot")
-        dot.setStyleSheet(f"background: {color}; border-radius: 3px;")
-        dot.setFixedSize(6, 6)
+        dot = QFrame()
+        dot.setObjectName("compactReadingMarker")
+        dot.setStyleSheet(f"background: {color}; border: none; border-radius: 0px;")
+        dot.setFixedSize(12, 4)
 
         name_label = QLabel(name)
         name_label.setObjectName("compactReadingName")
@@ -1949,24 +2143,27 @@ class MainWindow(QMainWindow):
         # UI preview data is deliberately cleared before each run. The manager
         # will create a new CSV/XLSX file for the new experiment.
         self.commit_filename_stem()
+        self.commit_recipe_event()
         if not self.ensure_ready_to_start():
             return
 
         if self.completed_experiment_exists and not self.confirm_new_experiment():
             return
 
-        if self.manager.mfc_mode == "simulation":
-            # Keep the complete live-validation summary visible instead of
-            # replacing it with the first error raised while building a run.
-            if not self.validate_recipe_live():
-                return
-            try:
-                self.recipe_to_run = self.simulated_recipe_steps()
-            except ValueError as exc:
-                self.on_device_error(f"Experiment is invalid. {exc}")
-                return
-        else:
+        # Keep the complete live-validation summary visible instead of
+        # replacing it with the first error raised while building a run.
+        if not self.validate_recipe_live():
+            return
+        try:
+            self.recipe_to_run = self.schedule_steps()
+            self.manager.validate_recipe_start(self.recipe_to_run)
+        except (ValueError, RuntimeError, ConnectionError) as exc:
+            self.on_device_error(f"Experiment is invalid. {exc}")
+            return
+
+        if self.manager.mfc_mode == "real" and not self.confirm_real_schedule_start():
             self.recipe_to_run = ()
+            return
 
         self.time_data.clear()
         self.resistance_data.clear()
@@ -1983,6 +2180,10 @@ class MainWindow(QMainWindow):
             self.format_selector.currentText(),
             self.data_directory,
             self.filename_stem,
+            {
+                "target_total_mln_min": self.recipe_target_total_input.value(),
+                "schedule": self.recipe_to_run,
+            },
         )
 
     def open_data_folder(self):
@@ -2075,6 +2276,26 @@ class MainWindow(QMainWindow):
         dialog.exec()
         return dialog.clickedButton() == start_button
 
+    def confirm_real_schedule_start(self):
+        target_total = self.recipe_target_total_input.value()
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Start real MFC schedule?")
+        dialog.setText(
+            f"Run {len(self.recipe_to_run)} schedule step(s) on the real MFC rack?"
+        )
+        dialog.setInformativeText(
+            f"The target total is {target_total:g} mln/min. The app will apply the "
+            "six-channel setpoints for every step, write the event log, and command "
+            "all MFCs to zero on Stop, error, or completion. Confirm the gas path and "
+            "sensor-chamber outlet are open before continuing."
+        )
+        start_button = dialog.addButton("Start real schedule", QMessageBox.AcceptRole)
+        cancel_button = dialog.addButton("Cancel", QMessageBox.RejectRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+        return dialog.clickedButton() == start_button
+
     def clear_recipe_schedule(self):
         if self.is_experiment_running():
             return
@@ -2098,6 +2319,7 @@ class MainWindow(QMainWindow):
             clear_recipe_steps(self.recipe_table)
         finally:
             self.recipe_table.blockSignals(False)
+        self.on_recipe_selection_changed()
         self.validate_recipe_live()
 
     def ensure_ready_to_start(self):
@@ -2124,17 +2346,17 @@ class MainWindow(QMainWindow):
     def on_rate_changed(self, rate_hz):
         self.manager.set_acquisition_rate_hz(rate_hz)
 
-    def simulated_recipe_steps(self):
+    def schedule_steps(self):
         steps = []
         for row in range(self.recipe_table.rowCount()):
-            duration_minutes = self.recipe_number(row, 2, "duration")
+            duration_seconds = self.recipe_duration_number(row)
             setpoints = {
                 index: self.recipe_number(row, index + 2, f"MFC {index}")
                 for index in range(1, 7)
             }
-            if duration_minutes == 0 and not any(setpoints.values()):
+            if duration_seconds == 0 and not any(setpoints.values()):
                 continue
-            if duration_minutes <= 0:
+            if duration_seconds <= 0:
                 raise ValueError(f"Step {row + 1} duration must be greater than zero.")
             for index, value in setpoints.items():
                 capacity = self.manager.mfc_channel_capacity_sccm(index)
@@ -2151,10 +2373,18 @@ class MainWindow(QMainWindow):
                     f"Step {row + 1} step total ({total_setpoint:g} mln/min) must equal "
                     f"the sum of MFC setpoints ({channel_total:g} mln/min)."
                 )
+            target_total = self.recipe_target_total_input.value()
+            if not flow_matches_target(channel_total, target_total):
+                raise ValueError(
+                    f"Step {row + 1} total ({channel_total:g} mln/min) must equal "
+                    f"the {target_total:g} mln/min target flow."
+                )
             steps.append({
                 "total_setpoint_mln_min": total_setpoint,
-                "duration_ms": round(duration_minutes * 60_000),
+                "target_total_mln_min": target_total,
+                "duration_ms": round(duration_seconds * 1_000),
                 "setpoints": setpoints,
+                "event_name": recipe_event(self.recipe_table, row),
             })
         if not steps:
             raise ValueError("Add at least one experiment step.")
@@ -2184,6 +2414,7 @@ class MainWindow(QMainWindow):
 
         self.recipe_table.blockSignals(True)
         total_item.setText("--" if invalid_value else f"{sum(values):g}")
+        style_recipe_total_item(total_item)
         self.recipe_table.blockSignals(False)
 
     def validate_recipe_live(self, _changed_item=None):
@@ -2198,15 +2429,13 @@ class MainWindow(QMainWindow):
 
     def _validate_recipe_live(self):
         errors = []
-        total_capacity = sum(
-            self.manager.mfc_channel_capacity_sccm(index) for index in range(1, 7)
-        )
+        target_total = self.recipe_target_total_input.value()
 
         for row in range(self.recipe_table.rowCount()):
             for column in range(1, 9):
                 self.set_recipe_item_error(row, column, "")
 
-            duration = self.recipe_cell_value(row, 2)
+            duration = self.recipe_duration_cell_value(row)
             setpoints = {
                 index: self.recipe_cell_value(row, index + 2)
                 for index in range(1, 7)
@@ -2217,8 +2446,8 @@ class MainWindow(QMainWindow):
 
             if duration is None or duration <= 0:
                 message = (
-                    f"Step {row + 1} duration must be greater than zero "
-                    "and must not contain leading zeros."
+                    f"Step {row + 1} duration must use an explicit unit, for example "
+                    "30 s or 2 min, and must be greater than zero."
                 )
                 self.set_recipe_item_error(row, 2, message)
                 errors.append((row + 1, message))
@@ -2249,10 +2478,10 @@ class MainWindow(QMainWindow):
                 continue
 
             total_setpoint = sum(numeric_setpoints)
-            if total_setpoint > total_capacity:
+            if not flow_matches_target(total_setpoint, target_total):
                 message = (
-                    f"Step {row + 1} step total exceeds the "
-                    f"{total_capacity:g} mln/min rack capacity."
+                    f"Step {row + 1} total must equal the "
+                    f"{target_total:g} mln/min target flow."
                 )
                 self.set_recipe_item_error(row, 1, message)
                 errors.append((row + 1, message))
@@ -2261,7 +2490,8 @@ class MainWindow(QMainWindow):
             step_numbers = sorted({step_number for step_number, _message in errors})
             steps_text = ", ".join(str(step_number) for step_number in step_numbers)
             issue_count = len(errors)
-            self.recipe_issues_label.setText(f"{issue_count} issues")
+            issue_label = "Issue" if issue_count == 1 else "Issues"
+            self.recipe_issues_label.setText(f"{issue_count} {issue_label}")
             self.recipe_issues_label.setToolTip("\n".join(message for _step, message in errors))
             self.recipe_issues_label.show()
             noun = "error" if issue_count == 1 else "errors"
@@ -2290,6 +2520,12 @@ class MainWindow(QMainWindow):
         value = float(numeric_text)
         return value if math.isfinite(value) else None
 
+    def recipe_duration_cell_value(self, row):
+        item = self.recipe_table.item(row, 2)
+        raw_value = item.text().strip() if item is not None else ""
+        value = parse_duration_seconds(raw_value)
+        return value if value is not None and math.isfinite(value) else None
+
     @staticmethod
     def recipe_numeric_text(raw_value):
         if not raw_value:
@@ -2306,6 +2542,8 @@ class MainWindow(QMainWindow):
         if message:
             item.setData(Qt.BackgroundRole, QColor("#fee2e2"))
             item.setData(Qt.ForegroundRole, QColor("#b91c1c"))
+        elif column == 1:
+            style_recipe_total_item(item)
         else:
             item.setData(Qt.BackgroundRole, None)
             item.setData(Qt.ForegroundRole, None)
@@ -2324,6 +2562,160 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Step {row + 1} {label} must be a non-negative number without leading zeros.")
         return value
 
+    def recipe_duration_number(self, row):
+        item = self.recipe_table.item(row, 2)
+        raw_value = item.text().strip() if item is not None else ""
+        value = parse_duration_seconds(raw_value)
+        if value is None or not math.isfinite(value) or value < 0:
+            raise ValueError(
+                f"Step {row + 1} duration must use an explicit unit, for example 30 s or 2 min."
+            )
+        return value
+
+    def recipe_mixture_input(self, minimum, maximum, value):
+        input_widget = QDoubleSpinBox()
+        input_widget.setObjectName("recipeMixtureInput")
+        input_widget.setRange(minimum, maximum)
+        input_widget.setDecimals(1)
+        input_widget.setSingleStep(0.5)
+        input_widget.setValue(value)
+        input_widget.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        input_widget.setFixedWidth(62)
+        input_widget.setFixedHeight(24)
+        return input_widget
+
+    def selected_recipe_row(self):
+        selected_rows = self.recipe_table.selectionModel().selectedRows()
+        return selected_rows[0].row() if selected_rows else -1
+
+    def update_recipe_mfc6_remainder(self, *_args):
+        if not hasattr(self, "recipe_mfc6_remainder_label"):
+            return
+
+        target_total = self.recipe_target_total_input.value()
+        humid_air = target_total * self.recipe_rh_input.value() / 100
+        analyte_total = sum(input_widget.value() for input_widget in self.recipe_gas_inputs.values())
+        remainder = target_total - humid_air - analyte_total - self.recipe_dry_mfc5_input.value()
+        capacity = self.manager.mfc_channel_capacity_sccm(6)
+        valid = -0.01 <= remainder <= capacity + 0.01
+        self.recipe_mfc6_remainder_label.setText(f"{max(0.0, remainder):g} mln/min")
+        self.recipe_mfc6_remainder_label.setStyleSheet(
+            "color: #b91c1c;" if not valid else ""
+        )
+        message = ""
+        if remainder < -0.01:
+            message = "Humidity, analyte gases, and MFC5 dry air exceed the target total."
+        elif remainder > capacity + 0.01:
+            message = f"MFC6 remainder exceeds its {capacity:g} mln/min capacity."
+        self.recipe_mfc6_remainder_label.setToolTip(message)
+        return remainder
+
+    def apply_recipe_mixture(self):
+        if self.is_experiment_running():
+            return
+
+        row = self.selected_recipe_row()
+        if row < 0:
+            self.set_system_message("Select an experiment step before calculating a mixture.", "error")
+            return
+
+        target_total = self.recipe_target_total_input.value()
+        humid_air = target_total * self.recipe_rh_input.value() / 100
+        setpoints = {
+            1: self.recipe_gas_inputs[1].value(),
+            2: self.recipe_gas_inputs[2].value(),
+            3: self.recipe_gas_inputs[3].value(),
+            4: humid_air,
+            5: self.recipe_dry_mfc5_input.value(),
+            6: self.update_recipe_mfc6_remainder(),
+        }
+        invalid_channels = [
+            index
+            for index, value in setpoints.items()
+            if value < -0.01 or value > self.manager.mfc_channel_capacity_sccm(index) + 0.01
+        ]
+        if invalid_channels:
+            self.set_system_message(
+                "Mixture cannot be applied: adjust RH, gas flow, or the MFC5 dry-air split. "
+                f"Invalid MFC: {', '.join(str(index) for index in invalid_channels)}.",
+                "error",
+            )
+            return
+
+        self.recipe_table.blockSignals(True)
+        try:
+            for index, value in setpoints.items():
+                item = self.recipe_table.item(row, index + 2)
+                if item is not None:
+                    item.setText(f"{max(0.0, value):g}")
+        finally:
+            self.recipe_table.blockSignals(False)
+
+        self.update_recipe_total(self.recipe_table.item(row, 3))
+        if not recipe_event(self.recipe_table, row):
+            event_parts = []
+            if self.recipe_rh_input.value() > 0:
+                event_parts.append(f"Set {self.recipe_rh_input.value():g}% RH")
+            if any(setpoints[index] > 0 for index in range(1, 4)):
+                gases = ", ".join(
+                    f"Gas {index} {setpoints[index]:g} mln/min"
+                    for index in range(1, 4)
+                    if setpoints[index] > 0
+                )
+                event_parts.append(f"Exposure: {gases}")
+            set_recipe_event(
+                self.recipe_table,
+                row,
+                " | ".join(event_parts) or "Baseline: dry air",
+            )
+        self.on_recipe_selection_changed()
+        self.validate_recipe_live()
+
+    def sync_recipe_mixture_from_row(self, row):
+        if row < 0:
+            return
+
+        values = {
+            index: self.recipe_cell_value(row, index + 2) or 0.0
+            for index in range(1, 7)
+        }
+        target_total = self.recipe_target_total_input.value()
+        rh = 100 * values[4] / target_total if target_total else 0.0
+        widgets_and_values = (
+            (self.recipe_rh_input, rh),
+            (self.recipe_gas_inputs[1], values[1]),
+            (self.recipe_gas_inputs[2], values[2]),
+            (self.recipe_gas_inputs[3], values[3]),
+            (self.recipe_dry_mfc5_input, values[5]),
+        )
+        for input_widget, value in widgets_and_values:
+            input_widget.blockSignals(True)
+            input_widget.setValue(value)
+            input_widget.blockSignals(False)
+        self.update_recipe_mfc6_remainder()
+
+    def on_recipe_selection_changed(self):
+        row = self.selected_recipe_row()
+        self.recipe_event_input.blockSignals(True)
+        self.recipe_event_input.setText(recipe_event(self.recipe_table, row))
+        self.recipe_event_input.blockSignals(False)
+        editable = row >= 0 and not self.is_experiment_running()
+        self.recipe_event_input.setEnabled(editable)
+        for input_widget in self.recipe_mixture_inputs:
+            input_widget.setEnabled(editable)
+        self.recipe_apply_mixture_button.setEnabled(editable)
+        self.sync_recipe_mixture_from_row(row)
+
+    def commit_recipe_event(self):
+        selected_rows = self.recipe_table.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+        set_recipe_event(
+            self.recipe_table,
+            selected_rows[0].row(),
+            self.recipe_event_input.text(),
+        )
+
     def on_experiment_started(self, filename):
         self.completed_experiment_exists = False
         self.current_file_path = filename
@@ -2331,6 +2723,11 @@ class MainWindow(QMainWindow):
         self.experiment_step_deadline = None
         self.start_button.setEnabled(False)
         set_recipe_editable(self.recipe_table, self.recipe_action_buttons, False)
+        self.recipe_target_total_input.setEnabled(False)
+        self.recipe_event_input.setEnabled(False)
+        for input_widget in self.recipe_mixture_inputs:
+            input_widget.setEnabled(False)
+        self.recipe_apply_mixture_button.setEnabled(False)
         self.format_selector.setEnabled(False)
         self.rate_control.setEnabled(False)
         self.save_location_input.setEnabled(False)
@@ -2344,8 +2741,8 @@ class MainWindow(QMainWindow):
         self.bottom_acquisition_label.setText("Acquisition running")
         self.set_system_message("Data logging in progress.", "running")
         self.update_experiment_status()
-        if self.recipe_to_run:
-            self.manager.start_simulated_recipe(self.recipe_to_run)
+        if self.recipe_to_run and not self.manager.start_recipe(self.recipe_to_run):
+            self.manager.stop_experiment("Stopped: schedule could not be applied")
 
     def on_experiment_stopped(self, message):
         stopped_after_error = self.status_label.text() == "ERROR"
@@ -2356,6 +2753,8 @@ class MainWindow(QMainWindow):
         self.experiment_status_timer.stop()
         self.start_button.setEnabled(True)
         set_recipe_editable(self.recipe_table, self.recipe_action_buttons, True)
+        self.recipe_target_total_input.setEnabled(True)
+        self.on_recipe_selection_changed()
         self.format_selector.setEnabled(True)
         self.rate_control.setEnabled(True)
         self.save_location_input.setEnabled(True)
@@ -2412,12 +2811,6 @@ class MainWindow(QMainWindow):
         self.experiment_total_time_value.setText(
             self.format_experiment_duration(total_seconds) if total_seconds else "--"
         )
-        state = self.status_label.text().lower()
-        self.experiment_state_value.setText(state.title())
-        self.experiment_state_value.setProperty("state", state)
-        self.experiment_state_value.style().unpolish(self.experiment_state_value)
-        self.experiment_state_value.style().polish(self.experiment_state_value)
-
         if (
             self.is_experiment_running()
             and 0 <= self.experiment_status_step_index < len(self.recipe_to_run)
@@ -2439,9 +2832,9 @@ class MainWindow(QMainWindow):
     def experiment_schedule_total_seconds(self):
         total_seconds = 0
         for row in range(self.recipe_table.rowCount()):
-            duration_minutes = self.recipe_cell_value(row, 2)
-            if duration_minutes is not None and duration_minutes > 0:
-                total_seconds += round(duration_minutes * 60)
+            duration_seconds = self.recipe_duration_cell_value(row)
+            if duration_seconds is not None and duration_seconds > 0:
+                total_seconds += round(duration_seconds)
         return total_seconds
 
     @staticmethod
@@ -2486,6 +2879,110 @@ class MainWindow(QMainWindow):
     def is_experiment_running(self):
         return self.manager.acquisition_timer.isActive()
 
+    def update_manual_mfc_test_limit(self, _index=None):
+        if not hasattr(self, "manual_mfc_flow_input"):
+            return
+        channel_index = self.manual_mfc_channel_selector.currentData()
+        try:
+            capacity = self.manager.mfc_channel_capacity_sccm(int(channel_index))
+        except (TypeError, ValueError, IndexError):
+            capacity = 0.0
+        self.manual_mfc_flow_input.setRange(0.01, max(0.01, capacity))
+        self.manual_mfc_flow_input.setToolTip(
+            f"MFC {channel_index} hardware capacity: {capacity:g} mln/min"
+        )
+        if self.manual_mfc_flow_input.value() > capacity > 0:
+            self.manual_mfc_flow_input.setValue(capacity)
+
+    def update_manual_mfc_test_controls(self):
+        if not hasattr(self, "manual_mfc_test_card"):
+            return
+        ready = (
+            self.manager.mfc_mode == "real"
+            and self.is_real_mfc_mode()
+            and not self.is_experiment_running()
+        )
+        for widget in (
+            self.manual_mfc_channel_selector,
+            self.manual_mfc_flow_input,
+            self.manual_mfc_apply_button,
+            self.manual_mfc_zero_button,
+        ):
+            widget.setEnabled(ready)
+
+        if ready:
+            self.manual_mfc_test_state.setText(
+                "One channel only. All MFC setpoints must be zero before Apply."
+            )
+        elif self.is_experiment_running():
+            self.manual_mfc_test_state.setText(
+                "Manual test is disabled while an experiment is running."
+            )
+        else:
+            self.manual_mfc_test_state.setText(
+                "Connect a verified real rack to enable manual testing."
+            )
+
+    def apply_manual_mfc_test(self):
+        if not self.manual_mfc_apply_button.isEnabled():
+            return
+
+        channel_index = self.manual_mfc_channel_selector.currentData()
+        flow = self.manual_mfc_flow_input.value()
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Apply real MFC test flow?")
+        dialog.setText(f"Apply {flow:g} mln/min to MFC {channel_index}?")
+        dialog.setInformativeText(
+            "This sends a real command to the verified MFC rack. Only the selected "
+            "channel may flow; the app will refuse the test unless every MFC setpoint "
+            "is currently zero. Confirm the gas outlet is open before continuing."
+        )
+        apply_button = dialog.addButton("Apply test flow", QMessageBox.AcceptRole)
+        cancel_button = dialog.addButton("Cancel", QMessageBox.RejectRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+        if dialog.clickedButton() != apply_button:
+            return
+
+        state = self.manager.apply_manual_mfc_test(channel_index, flow)
+        if state is None:
+            return
+        self.manual_mfc_test_state.setText(
+            f"MFC {channel_index} command confirmed: {flow:g} mln/min. "
+            "Use Zero all MFCs when the check is complete."
+        )
+        self.set_system_message(
+            f"Manual MFC test active on MFC {channel_index}: {flow:g} mln/min.",
+            "running",
+        )
+
+    def confirm_zero_all_mfcs(self):
+        if not self.manual_mfc_zero_button.isEnabled():
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Zero all real MFCs?")
+        dialog.setText("Set all six real MFC setpoints to zero?")
+        dialog.setInformativeText(
+            "The app will send zero to every verified controller and then read the "
+            "setpoints back. Do not treat a communication error as confirmation that "
+            "the gas flow has stopped."
+        )
+        zero_button = dialog.addButton("Zero all MFCs", QMessageBox.DestructiveRole)
+        cancel_button = dialog.addButton("Cancel", QMessageBox.RejectRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+        if dialog.clickedButton() != zero_button:
+            return
+
+        state = self.manager.zero_real_mfc_setpoints()
+        if state is None:
+            return
+        self.manual_mfc_test_state.setText("All six MFC zero setpoints were confirmed.")
+        self.set_system_message("All verified MFC setpoints reset to zero.", "idle")
+
     def update_device_setup_controls_enabled(self):
         setup_enabled = not self.is_experiment_running()
         multimeter_real = self.is_real_multimeter_mode()
@@ -2504,6 +3001,7 @@ class MainWindow(QMainWindow):
         mfc_port = self.mfc_port_selector.currentData()
         mfc_ready = not mfc_real or mfc_port in self.mfc_verified_ports
         self.connect_mfc_button.setEnabled(setup_enabled and mfc_ready)
+        self.update_manual_mfc_test_controls()
 
     def on_multimeter_mode_changed(self, _text):
         is_real = self.is_real_multimeter_mode()
@@ -2669,13 +3167,13 @@ class MainWindow(QMainWindow):
                 "disconnected",
             )
             self.mfc_note_label.setText(
-                "Read-only. Scan verifies 6 MFC nodes before connection."
+                "Scan verifies 6 MFC nodes before connection. Manual test is available after connect."
             )
             self.manual_mode_label.setText(
-                "Real MFC mode (read-only). Flow control is disabled"
+                "Real MFC mode. Schedule flow control remains disabled."
             )
             self.bottom_mode_label.setText(
-                "Read-only mode: MFC readings are allowed, flow control is disabled."
+                "Real rack mode: manual single-channel test is available after connection."
             )
             self.on_device_error(
                 "MFC rack is not connected. Scan Rack to verify all 6 nodes."
@@ -2765,8 +3263,12 @@ class MainWindow(QMainWindow):
         self.file_label.setText(f"Found {len(verified)} verified MFC rack(s)")
         self.status_label.setText("IDLE")
         self.set_status_badge_state("idle")
-        self.set_system_message("MFC rack verified. Click Connect to use read-only measurements.", "idle")
+        self.set_system_message(
+            "MFC rack verified. Click Connect to monitor it or run a manual single-channel test.",
+            "idle",
+        )
         self.update_device_setup_controls_enabled()
+        self.update_manual_mfc_test_controls()
 
     def connect_mfc(self):
         if self.is_experiment_running():
@@ -2788,7 +3290,10 @@ class MainWindow(QMainWindow):
             self.set_status_badge_state("idle")
             self.file_label.setText("MFC ready")
             if self.is_real_mfc_mode():
-                self.set_system_message("MFC rack connected in read-only mode.", "idle")
+                self.set_system_message(
+                    "MFC rack connected. Manual single-channel test is available.",
+                    "idle",
+                )
         elif self.is_real_mfc_mode():
             self.set_device_summary(
                 self.mfc_summary_label,
@@ -2812,6 +3317,7 @@ class MainWindow(QMainWindow):
             )
             self.mfc_status_label.setToolTip(status)
             self.set_mfc_write_controls_enabled(False)
+            self.update_manual_mfc_test_limit()
         else:
             if self.is_real_mfc_mode():
                 self.set_connection_label(
@@ -2840,6 +3346,7 @@ class MainWindow(QMainWindow):
                 )
                 self.set_mfc_write_controls_enabled(True)
             self.mfc_status_label.setToolTip(status)
+        self.update_manual_mfc_test_controls()
 
     @staticmethod
     def set_device_summary(label, dot, text, state):
@@ -2863,7 +3370,7 @@ class MainWindow(QMainWindow):
             parts = [part.strip() for part in status.split("|")]
             port = parts[1] if len(parts) > 1 else ""
             verification = parts[2] if len(parts) > 2 else ""
-            return f"Rack connected: {port}\n{verification} | read-only".strip()
+            return f"Rack connected: {port}\n{verification} | manual test available".strip()
 
         parts = [part.strip() for part in status.split("|")]
         port = ""
@@ -2884,7 +3391,7 @@ class MainWindow(QMainWindow):
             elif part.startswith("capacity "):
                 capacity = part.replace("capacity ", "")
 
-        first_line = "Real read-only"
+        first_line = "Real MFC"
         if port or address:
             first_line = f"{first_line}: {port} {address}".strip()
 
@@ -2999,12 +3506,12 @@ class MainWindow(QMainWindow):
         if verified and self.manager.mfc_mode == "real":
             port = state.mfc_port or self.manager.mfc_port
             self.mfc_rack_status_label.setText(
-                f"Read-only | {port} | {self.manager.settings.mfc_baudrate} | 6/6 verified"
+                f"Real rack | {port} | {self.manager.settings.mfc_baudrate} | 6/6 verified"
             )
         elif verified:
             self.mfc_rack_status_label.setText("Simulation | 6 simulated MFC channels")
         elif self.manager.mfc_mode == "real":
-            self.mfc_rack_status_label.setText("Read-only | rack not connected")
+            self.mfc_rack_status_label.setText("Real rack | not connected")
         else:
             self.mfc_rack_status_label.setText("Simulation | rack not connected")
 
@@ -3015,12 +3522,10 @@ class MainWindow(QMainWindow):
             self.max_total_flow_label.setText(f"{total_capacity:g} mln/min")
             self.nh3_actual_label.setText(f"{total_actual:.2f} mln/min")
             self.air_actual_label.setText(f"{total_setpoint:.2f} mln/min")
-            self.recipe_max_total_label.setText(f"Rack capacity: {total_capacity:g} mln/min")
         else:
             self.max_total_flow_label.setText("--")
             self.nh3_actual_label.setText("--")
             self.air_actual_label.setText("--")
-            self.recipe_max_total_label.setText("Rack capacity: --")
 
         for index, widgets in self.mfc_channel_monitor.items():
             channel = channels.get(index)
@@ -3454,7 +3959,6 @@ class MainWindow(QMainWindow):
                 border-radius: 4px;
             }
             QFrame#metricRow,
-            QFrame#deviceRow,
             QFrame#deviceStatusRow,
             QFrame#readingCard,
             QFrame#controlCard,
@@ -3465,7 +3969,9 @@ class MainWindow(QMainWindow):
                 border-radius: 7px;
             }
             QFrame#deviceRow {
-                border-radius: 5px;
+                background: #f7f9fc;
+                border: none;
+                border-radius: 0;
             }
             QFrame#mfcChannelMonitorRow {
                 background: transparent;
@@ -3493,6 +3999,12 @@ class MainWindow(QMainWindow):
                 max-width: 6px;
                 min-height: 6px;
                 max-height: 6px;
+            }
+            QFrame#compactReadingMarker {
+                min-width: 12px;
+                max-width: 12px;
+                min-height: 4px;
+                max-height: 4px;
             }
             QLabel {
                 color: #233244;
@@ -3554,12 +4066,12 @@ class MainWindow(QMainWindow):
             }
             QLabel#experimentStatusValue {
                 color: #0f172a;
-                font-size: 12px;
+                font-size: 16px;
                 font-weight: 700;
             }
             QLabel#experimentTimeValue {
                 color: #0f172a;
-                font-size: 13px;
+                font-size: 16px;
                 font-weight: 700;
             }
             QLabel#experimentStatusName {
@@ -3643,9 +4155,9 @@ class MainWindow(QMainWindow):
             QLabel#mfcRackStatus {
                 color: #2563eb;
                 background: #eff6ff;
-                border: 1px solid #bfdbfe;
-                border-radius: 5px;
-                padding: 6px 10px;
+                border: none;
+                border-radius: 0;
+                padding: 8px 10px;
                 font-size: 11px;
                 font-weight: 600;
             }
@@ -4008,6 +4520,50 @@ class MainWindow(QMainWindow):
                 font-size: 11px;
                 font-weight: 700;
             }
+            QLabel#recipeTargetUnit {
+                color: #475569;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QLabel#recipeMixtureTitle {
+                color: #334155;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QLabel#recipeMixtureValue {
+                color: #334155;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QDoubleSpinBox#recipeMixtureInput {
+                min-height: 0;
+                max-height: 24px;
+                padding: 0 4px;
+            }
+            QPushButton#recipeMixtureButton {
+                color: #1d4ed8;
+                background: transparent;
+                border: 1px solid #bfdbfe;
+                border-radius: 4px;
+                padding: 0 8px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton#recipeMixtureButton:hover {
+                background: #dbeafe;
+                border-color: #93c5fd;
+            }
+            QDoubleSpinBox#recipeTargetTotal {
+                min-height: 0;
+                max-height: 22px;
+                padding-top: 0;
+                padding-bottom: 0;
+            }
+            QLineEdit#recipeEventInput {
+                min-height: 0;
+                max-height: 28px;
+                padding: 0 7px;
+            }
             QLabel#recipeIssues {
                 color: #b91c1c;
                 background: #fee2e2;
@@ -4016,6 +4572,49 @@ class MainWindow(QMainWindow):
                 padding: 3px 6px;
                 font-size: 11px;
                 font-weight: 700;
+            }
+            QLabel#manualMfcLabel,
+            QLabel#manualMfcUnit {
+                color: #475569;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QLabel#manualMfcHint {
+                color: #64748b;
+                font-size: 10px;
+                line-height: 1.25;
+            }
+            QComboBox#manualMfcChannel,
+            QDoubleSpinBox#manualMfcFlow {
+                min-height: 0;
+                max-height: 26px;
+                padding: 0 6px;
+            }
+            QPushButton#manualMfcApplyButton {
+                color: #1d4ed8;
+                background: transparent;
+                border: 1px solid #bfdbfe;
+                border-radius: 4px;
+                padding: 0 6px;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QPushButton#manualMfcApplyButton:hover {
+                background: #dbeafe;
+                border-color: #93c5fd;
+            }
+            QPushButton#manualMfcZeroButton {
+                color: #b91c1c;
+                background: transparent;
+                border: 1px solid #fecaca;
+                border-radius: 4px;
+                padding: 0 6px;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QPushButton#manualMfcZeroButton:hover {
+                background: #fee2e2;
+                border-color: #fca5a5;
             }
             QPushButton:disabled {
                 color: #9ca3af;
@@ -4042,6 +4641,12 @@ class MainWindow(QMainWindow):
                 color: #0f172a;
                 border: 0;
                 outline: none;
+            }
+            QTableWidget#recipeTable QLineEdit {
+                min-height: 0;
+                max-height: 20px;
+                padding: 0 3px;
+                border-radius: 0;
             }
             QHeaderView::section {
                 background: #eef2f7;
