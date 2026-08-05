@@ -13,6 +13,11 @@ class ClosingLogger:
         self.close_calls += 1
 
 
+class FailingShutdownMFC:
+    def safe_shutdown(self):
+        raise ConnectionError("write confirmation failed")
+
+
 class AcquisitionManagerShutdownTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -71,6 +76,15 @@ class AcquisitionManagerShutdownTests(unittest.TestCase):
         self.assert_run_is_safely_closed()
         self.assertEqual(logger.close_calls, 1)
         self.assertEqual(self.messages[-1], "Stopped by operator")
+
+    def test_stop_reports_a_critical_message_when_zeroing_cannot_be_confirmed(self):
+        self.manager.mfc = FailingShutdownMFC()
+        self.manager.logger = ClosingLogger()
+
+        self.manager.stop_experiment("Stopped by operator")
+
+        self.assertIn("CRITICAL", self.messages[-1])
+        self.assertIn("could not be confirmed", self.messages[-1])
 
 
 if __name__ == "__main__":

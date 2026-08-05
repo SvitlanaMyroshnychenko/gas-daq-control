@@ -11,7 +11,6 @@ DEFAULT_RECIPE_EVENTS = (
     "Purge: dry air",
 )
 
-
 def configure_recipe_table(recipe_table):
     recipe_table.setEditTriggers(
         QAbstractItemView.DoubleClicked
@@ -28,21 +27,26 @@ def configure_recipe_table(recipe_table):
     recipe_table.verticalHeader().setDefaultSectionSize(24)
 
     header = recipe_table.horizontalHeader()
-    header.setSectionResizeMode(QHeaderView.Stretch)
+    header.setSectionResizeMode(0, QHeaderView.Fixed)
+    recipe_table.setColumnWidth(0, 54)
+    for column in range(1, recipe_table.columnCount()):
+        header.setSectionResizeMode(column, QHeaderView.Stretch)
 
     defaults = [
-        ("1", "150", "60 min", "0", "0", "0", "0", "150", "0"),
-        ("2", "150", "20 min", "0", "0", "0", "75", "75", "0"),
-        ("3", "150", "0.5 min", "1.5", "0", "0", "75", "50", "23.5"),
-        ("4", "150", "20 min", "0", "0", "0", "75", "75", "0"),
-        ("5", "150", "30 min", "0", "0", "0", "0", "150", "0"),
+        ("1", "150", "60 min", "0", "0", "0", "0", "0", "150", "0"),
+        ("2", "150", "20 min", "50", "0", "0", "0", "75", "75", "0"),
+        ("3", "150", "0.5 min", "50", "1.5", "0", "0", "75", "50", "23.5"),
+        ("4", "150", "20 min", "50", "0", "0", "0", "75", "75", "0"),
+        ("5", "150", "30 min", "0", "0", "0", "0", "0", "150", "0"),
     ]
     for row_index, row_values in enumerate(defaults):
         for column, value in enumerate(row_values):
-            item = recipe_item(value, editable=column not in (0, 1))
+            item = recipe_item(value, editable=column not in (0, 1, 3))
             item.setTextAlignment(Qt.AlignCenter)
             if column == 1:
                 style_recipe_total_item(item)
+            if column == 3:
+                style_recipe_rh_item(item)
             if column == 0:
                 item.setData(Qt.UserRole, DEFAULT_RECIPE_EVENTS[row_index])
             recipe_table.setItem(row_index, column, item)
@@ -67,11 +71,13 @@ def duplicate_recipe_step(recipe_table):
     for column in range(recipe_table.columnCount()):
         source_item = recipe_table.item(source_row, column)
         item = recipe_item(
-            source_item.text() if source_item else "", editable=column not in (0, 1)
+            source_item.text() if source_item else "", editable=column not in (0, 1, 3)
         )
         item.setTextAlignment(Qt.AlignCenter)
         if column == 1:
             style_recipe_total_item(item)
+        if column == 3:
+            style_recipe_rh_item(item)
         if column == 0 and source_item is not None:
             item.setData(Qt.UserRole, source_item.data(Qt.UserRole))
         recipe_table.setItem(target_row, column, item)
@@ -96,12 +102,14 @@ def clear_recipe_steps(recipe_table):
 
 
 def populate_recipe_row(recipe_table, row, step_number):
-    values = [step_number, "0", "0 min", "0", "0", "0", "0", "0", "0"]
+    values = [step_number, "0", "0 min", "0", "0", "0", "0", "0", "0", "0"]
     for column, value in enumerate(values):
-        item = recipe_item(value, editable=column not in (0, 1))
+        item = recipe_item(value, editable=column not in (0, 1, 3))
         item.setTextAlignment(Qt.AlignCenter)
         if column == 1:
             style_recipe_total_item(item)
+        if column == 3:
+            style_recipe_rh_item(item)
         recipe_table.setItem(row, column, item)
 
 
@@ -141,6 +149,13 @@ def style_recipe_total_item(item):
     item.setData(Qt.BackgroundRole, QColor("#eff6ff"))
     item.setData(Qt.ForegroundRole, QColor("#1d4ed8"))
     item.setToolTip("Calculated from the six MFC setpoints.")
+
+
+def style_recipe_rh_item(item):
+    """Visually distinguish the read-only humidity derived from MFC4."""
+    item.setData(Qt.BackgroundRole, QColor("#f5f3ff"))
+    item.setData(Qt.ForegroundRole, QColor("#6d28d9"))
+    item.setToolTip("Calculated from MFC4 flow and the target total flow.")
 
 
 def set_recipe_editable(recipe_table, action_buttons, enabled):

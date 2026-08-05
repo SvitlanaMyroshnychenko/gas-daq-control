@@ -52,6 +52,7 @@ from gas_sensor_daq.ui.recipe_table import (
     remove_recipe_step,
     set_recipe_editable,
     set_recipe_event,
+    style_recipe_rh_item,
     style_recipe_total_item,
 )
 
@@ -433,20 +434,24 @@ class MainWindow(QMainWindow):
             "Event",
         ])
         self.configure_log_table()
-        self.recipe_table = QTableWidget(5, 9)
+        self.recipe_table = QTableWidget(5, 10)
         self.recipe_table.setObjectName("recipeTable")
         self.recipe_table.setHorizontalHeaderLabels([
             "Step",
             "Step Total\n(mln/min)",
             "Duration\n(s / min)",
-            "MFC 1\n(mln/min)",
-            "MFC 2\n(mln/min)",
-            "MFC 3\n(mln/min)",
-            "MFC 4\n(mln/min)",
-            "MFC 5\n(mln/min)",
-            "MFC 6\n(mln/min)",
+            "RH\n(%)",
+            "MFC 1",
+            "MFC 2",
+            "MFC 3",
+            "MFC 4",
+            "MFC 5",
+            "MFC 6",
         ])
         configure_recipe_table(self.recipe_table)
+        self.recipe_table.setToolTip(
+            "All MFC flow values in this schedule are mln/min."
+        )
         # Keep the schedule compact at five visible steps; additional steps scroll.
         self.recipe_table.setFixedHeight(174)
         self.recipe_table.itemChanged.connect(self.update_recipe_total)
@@ -513,7 +518,10 @@ class MainWindow(QMainWindow):
         self.recipe_target_total_input.setFixedWidth(74)
         self.recipe_target_total_input.setFixedHeight(22)
         self.recipe_target_total_input.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.recipe_target_total_input.valueChanged.connect(self.validate_recipe_live)
+        self._last_recipe_target_total = self.recipe_target_total_input.value()
+        self.recipe_target_total_input.editingFinished.connect(
+            self.rescale_recipe_for_target_total
+        )
         self.recipe_target_total_input.valueChanged.connect(self.update_recipe_mfc6_remainder)
         self.recipe_target_total_unit_label = QLabel("mln/min")
         self.recipe_target_total_unit_label.setObjectName("recipeTargetUnit")
@@ -573,6 +581,7 @@ class MainWindow(QMainWindow):
         self.manager.multimeter_changed.connect(self.on_multimeter_changed)
         self.manager.mfc_changed.connect(self.on_mfc_changed)
         self.manager.recipe_step_changed.connect(self.on_recipe_step_changed)
+        self.manager.flow_warning.connect(self.on_flow_warning)
 
     def create_toolbar(self):
         toolbar = QFrame()
@@ -1105,12 +1114,12 @@ class MainWindow(QMainWindow):
         recipe_event_actions.addWidget(QLabel("Event"))
         recipe_event_actions.addWidget(self.recipe_event_input)
         recipe_event_actions.addStretch()
-        for button in self.recipe_action_buttons:
-            recipe_event_actions.addWidget(button)
         recipe_actions_layout.addLayout(recipe_event_actions)
 
+        recipe_mixture_band = QFrame()
+        recipe_mixture_band.setObjectName("recipeMixtureBand")
         recipe_mixture_layout = QVBoxLayout()
-        recipe_mixture_layout.setContentsMargins(0, 0, 0, 0)
+        recipe_mixture_layout.setContentsMargins(0, 8, 0, 8)
         recipe_mixture_layout.setSpacing(4)
         mixture_primary_row = QHBoxLayout()
         mixture_primary_row.setContentsMargins(0, 0, 0, 0)
@@ -1142,9 +1151,36 @@ class MainWindow(QMainWindow):
         mixture_dry_air_row.addWidget(self.recipe_apply_mixture_button)
         recipe_mixture_layout.addLayout(mixture_primary_row)
         recipe_mixture_layout.addLayout(mixture_dry_air_row)
-        recipe_actions_layout.addLayout(recipe_mixture_layout)
+        recipe_mixture_band.setLayout(recipe_mixture_layout)
+        recipe_actions_layout.addWidget(recipe_mixture_band)
         recipe_actions.setLayout(recipe_actions_layout)
-        recipe_layout.addWidget(recipe_actions)
+
+        self.recipe_details_title = QLabel("Step details")
+        self.recipe_details_title.setObjectName("recipeDetailsTitle")
+        self.recipe_details_step_label = QLabel("Selected: step 1")
+        self.recipe_details_step_label.setObjectName("recipeDetailsStep")
+        self.recipe_details_chevron = QPushButton()
+        self.recipe_details_chevron.setObjectName("logChevron")
+        self.recipe_details_chevron.setFixedSize(24, 22)
+        self.recipe_details_chevron.setCheckable(True)
+        self.recipe_details_chevron.setToolTip("Show or hide selected-step details")
+        self.recipe_details_chevron.clicked.connect(self.toggle_recipe_details)
+        recipe_details_header = QWidget()
+        recipe_details_header.setObjectName("recipeDetailsHeader")
+        recipe_details_header_layout = QHBoxLayout()
+        recipe_details_header_layout.setContentsMargins(0, 2, 0, 0)
+        recipe_details_header_layout.setSpacing(5)
+        recipe_details_header_layout.addWidget(self.recipe_details_title)
+        recipe_details_header_layout.addWidget(self.recipe_details_step_label)
+        recipe_details_header_layout.addStretch()
+        for button in self.recipe_action_buttons:
+            recipe_details_header_layout.addWidget(button)
+        recipe_details_header_layout.addWidget(self.recipe_details_chevron)
+        recipe_details_header.setLayout(recipe_details_header_layout)
+
+        self.recipe_details_content = recipe_actions
+        recipe_layout.addWidget(recipe_details_header)
+        recipe_layout.addWidget(self.recipe_details_content)
 
         recipe_target_control = QWidget()
         recipe_target_control_layout = QHBoxLayout()
@@ -1164,16 +1200,36 @@ class MainWindow(QMainWindow):
         recipe_header_controls_layout.addWidget(recipe_target_control)
         recipe_header_controls.setLayout(recipe_header_controls_layout)
 
+        self.recipe_chevron = QPushButton()
+        self.recipe_chevron.setObjectName("logChevron")
+        self.recipe_chevron.setFixedSize(24, 22)
+        self.recipe_chevron.setCheckable(True)
+        self.recipe_chevron.setToolTip("Show or hide experiment schedule")
+        self.recipe_chevron.clicked.connect(self.toggle_recipe_schedule)
+        recipe_header_widget = QWidget()
+        recipe_header_widget_layout = QHBoxLayout()
+        recipe_header_widget_layout.setContentsMargins(0, 0, 0, 0)
+        recipe_header_widget_layout.setSpacing(5)
+        recipe_header_widget_layout.addWidget(recipe_header_controls)
+        recipe_header_widget_layout.addWidget(self.recipe_chevron)
+        recipe_header_widget.setLayout(recipe_header_widget_layout)
+
         recipe_card = self.section_card(
             "Experiment Schedule",
             None,
             recipe_layout,
             expanding=False,
-            header_widget=recipe_header_controls,
+            header_widget=recipe_header_widget,
         )
         # Let the card account for both the five-row table and its bottom
         # action row. A fixed height clips them at non-100% display scaling.
+        self.recipe_card_widget = recipe_card
+        self.recipe_content_frame = recipe_card.content_frame
+        self.recipe_header_controls = recipe_header_controls
         recipe_card.setMinimumHeight(352)
+        self.recipe_details_expanded = True
+        self.set_recipe_schedule_expanded(True)
+        self.set_recipe_details_expanded(False)
 
         layout.addWidget(plot_card, 4)
         layout.addWidget(recipe_card)
@@ -1183,8 +1239,8 @@ class MainWindow(QMainWindow):
 
     def create_right_panel(self):
         panel = QWidget()
-        panel.setMinimumWidth(320)
-        panel.setMaximumWidth(335)
+        panel.setMinimumWidth(310)
+        panel.setMaximumWidth(320)
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1535,6 +1591,7 @@ class MainWindow(QMainWindow):
         content_frame.setLayout(content_layout)
         layout.addWidget(content_frame, 1)
         card.setLayout(layout)
+        card.content_frame = content_frame
         return card
 
     def compact_section_card(self, title, content_layout, title_accent=None):
@@ -2056,6 +2113,42 @@ class MainWindow(QMainWindow):
     def toggle_log_preview(self):
         self.set_log_preview_expanded(not self.log_preview_expanded)
 
+    def set_recipe_schedule_expanded(self, expanded):
+        self.recipe_schedule_expanded = expanded
+        self.recipe_content_frame.setVisible(expanded)
+        self.recipe_header_controls.setVisible(expanded)
+        self.recipe_chevron.setChecked(expanded)
+        self.recipe_chevron.setIcon(self.chevron_icon(expanded=expanded))
+
+        if expanded:
+            minimum_height = 352 if self.recipe_details_expanded else 258
+            self.recipe_card_widget.setMinimumHeight(minimum_height)
+            self.recipe_card_widget.setMaximumHeight(16777215)
+            self.recipe_card_widget.setSizePolicy(
+                QSizePolicy.Preferred, QSizePolicy.Preferred
+            )
+        else:
+            self.recipe_card_widget.setMinimumHeight(48)
+            self.recipe_card_widget.setMaximumHeight(48)
+            self.recipe_card_widget.setSizePolicy(
+                QSizePolicy.Preferred, QSizePolicy.Fixed
+            )
+
+    def toggle_recipe_schedule(self):
+        self.set_recipe_schedule_expanded(not self.recipe_schedule_expanded)
+
+    def set_recipe_details_expanded(self, expanded):
+        self.recipe_details_expanded = expanded
+        self.recipe_details_content.setVisible(expanded)
+        self.recipe_details_chevron.setChecked(expanded)
+        self.recipe_details_chevron.setIcon(self.chevron_icon(expanded=expanded))
+
+        if self.recipe_schedule_expanded:
+            self.recipe_card_widget.setMinimumHeight(352 if expanded else 258)
+
+    def toggle_recipe_details(self):
+        self.set_recipe_details_expanded(not self.recipe_details_expanded)
+
     def duration_ms(self, duration_input):
         return duration_input.value() * 1000
 
@@ -2351,7 +2444,7 @@ class MainWindow(QMainWindow):
         for row in range(self.recipe_table.rowCount()):
             duration_seconds = self.recipe_duration_number(row)
             setpoints = {
-                index: self.recipe_number(row, index + 2, f"MFC {index}")
+                index: self.recipe_number(row, index + 3, f"MFC {index}")
                 for index in range(1, 7)
             }
             if duration_seconds == 0 and not any(setpoints.values()):
@@ -2391,12 +2484,12 @@ class MainWindow(QMainWindow):
         return steps
 
     def update_recipe_total(self, changed_item):
-        if changed_item.column() < 3:
+        if changed_item.column() < 4:
             return
 
         values = []
         invalid_value = False
-        for column in range(3, 9):
+        for column in range(4, 10):
             item = self.recipe_table.item(changed_item.row(), column)
             raw_value = item.text().strip() if item is not None else ""
             numeric_text = self.recipe_numeric_text(raw_value)
@@ -2415,7 +2508,47 @@ class MainWindow(QMainWindow):
         self.recipe_table.blockSignals(True)
         total_item.setText("--" if invalid_value else f"{sum(values):g}")
         style_recipe_total_item(total_item)
+        self.update_recipe_rh(changed_item.row())
         self.recipe_table.blockSignals(False)
+
+    def update_recipe_rh(self, row):
+        target_total = self.recipe_target_total_input.value()
+        humid_air = self.recipe_cell_value(row, 7)
+        rh_item = self.recipe_table.item(row, 3)
+        if rh_item is None:
+            rh_item = QTableWidgetItem()
+            rh_item.setTextAlignment(Qt.AlignCenter)
+            rh_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.recipe_table.setItem(row, 3, rh_item)
+
+        rh_item.setText("--" if humid_air is None or target_total <= 0 else f"{100 * humid_air / target_total:g}")
+        style_recipe_rh_item(rh_item)
+
+    def rescale_recipe_for_target_total(self):
+        """Preserve every step's gas composition when its common target changes."""
+        new_target = self.recipe_target_total_input.value()
+        previous_target = getattr(self, "_last_recipe_target_total", new_target)
+        if math.isclose(new_target, previous_target, abs_tol=0.001):
+            self.validate_recipe_live()
+            return
+
+        scale = new_target / previous_target
+        self.recipe_table.blockSignals(True)
+        try:
+            for row in range(self.recipe_table.rowCount()):
+                for column in range(4, 10):
+                    value = self.recipe_cell_value(row, column)
+                    if value is None:
+                        continue
+                    item = self.recipe_table.item(row, column)
+                    item.setText(f"{value * scale:.6g}")
+                self.update_recipe_total(self.recipe_table.item(row, 4))
+        finally:
+            self.recipe_table.blockSignals(False)
+
+        self._last_recipe_target_total = new_target
+        self.on_recipe_selection_changed()
+        self.validate_recipe_live()
 
     def validate_recipe_live(self, _changed_item=None):
         if self.validating_recipe:
@@ -2432,12 +2565,12 @@ class MainWindow(QMainWindow):
         target_total = self.recipe_target_total_input.value()
 
         for row in range(self.recipe_table.rowCount()):
-            for column in range(1, 9):
+            for column in range(1, 10):
                 self.set_recipe_item_error(row, column, "")
 
             duration = self.recipe_duration_cell_value(row)
             setpoints = {
-                index: self.recipe_cell_value(row, index + 2)
+                index: self.recipe_cell_value(row, index + 3)
                 for index in range(1, 7)
             }
             has_values = any(value not in (None, 0.0) for value in setpoints.values())
@@ -2454,7 +2587,7 @@ class MainWindow(QMainWindow):
 
             numeric_setpoints = []
             for index, value in setpoints.items():
-                column = index + 2
+                column = index + 3
                 capacity = self.manager.mfc_channel_capacity_sccm(index)
                 if value is None or value < 0:
                     message = (
@@ -2544,6 +2677,8 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ForegroundRole, QColor("#b91c1c"))
         elif column == 1:
             style_recipe_total_item(item)
+        elif column == 3:
+            style_recipe_rh_item(item)
         else:
             item.setData(Qt.BackgroundRole, None)
             item.setData(Qt.ForegroundRole, None)
@@ -2645,13 +2780,13 @@ class MainWindow(QMainWindow):
         self.recipe_table.blockSignals(True)
         try:
             for index, value in setpoints.items():
-                item = self.recipe_table.item(row, index + 2)
+                item = self.recipe_table.item(row, index + 3)
                 if item is not None:
                     item.setText(f"{max(0.0, value):g}")
         finally:
             self.recipe_table.blockSignals(False)
 
-        self.update_recipe_total(self.recipe_table.item(row, 3))
+        self.update_recipe_total(self.recipe_table.item(row, 4))
         if not recipe_event(self.recipe_table, row):
             event_parts = []
             if self.recipe_rh_input.value() > 0:
@@ -2676,7 +2811,7 @@ class MainWindow(QMainWindow):
             return
 
         values = {
-            index: self.recipe_cell_value(row, index + 2) or 0.0
+            index: self.recipe_cell_value(row, index + 3) or 0.0
             for index in range(1, 7)
         }
         target_total = self.recipe_target_total_input.value()
@@ -2696,6 +2831,10 @@ class MainWindow(QMainWindow):
 
     def on_recipe_selection_changed(self):
         row = self.selected_recipe_row()
+        if hasattr(self, "recipe_details_step_label"):
+            self.recipe_details_step_label.setText(
+                f"Selected: step {row + 1}" if row >= 0 else "No step selected"
+            )
         self.recipe_event_input.blockSignals(True)
         self.recipe_event_input.setText(recipe_event(self.recipe_table, row))
         self.recipe_event_input.blockSignals(False)
@@ -2803,6 +2942,10 @@ class MainWindow(QMainWindow):
         self.set_system_message(message, "error")
         self.update_experiment_status()
 
+    def on_flow_warning(self, message):
+        self.bottom_acquisition_label.setText("Acquisition warning")
+        self.set_system_message(message, "warning")
+
     def update_experiment_status(self, *_args):
         if not hasattr(self, "experiment_step_value"):
             return
@@ -2848,7 +2991,7 @@ class MainWindow(QMainWindow):
         self.system_message_bar.show()
         self.update_toolbar_height()
         self.system_message_label.setText(message)
-        self.system_message_icon.setText("!" if state == "error" else "i")
+        self.system_message_icon.setText("!" if state in ("error", "warning") else "i")
         for widget in (
             self.system_message_bar,
             self.system_message_icon,
@@ -3801,6 +3944,10 @@ class MainWindow(QMainWindow):
                 background: #fef2f2;
                 border-color: #fca5a5;
             }
+            QFrame#systemMessageBar[state="warning"] {
+                background: #fffbeb;
+                border-color: #fcd34d;
+            }
             QLabel#systemMessageIcon {
                 color: #2563eb;
                 background: #dbeafe;
@@ -3820,6 +3967,10 @@ class MainWindow(QMainWindow):
                 color: #dc2626;
                 background: #fee2e2;
             }
+            QLabel#systemMessageIcon[state="warning"] {
+                color: #a16207;
+                background: #fef3c7;
+            }
             QLabel#systemMessageText {
                 color: #2563eb;
                 font-size: 11px;
@@ -3833,6 +3984,9 @@ class MainWindow(QMainWindow):
             }
             QLabel#systemMessageText[state="error"] {
                 color: #dc2626;
+            }
+            QLabel#systemMessageText[state="warning"] {
+                color: #a16207;
             }
             QPushButton#systemMessageDismissButton {
                 min-height: 18px;
@@ -3918,9 +4072,9 @@ class MainWindow(QMainWindow):
                 max-height: 10px;
             }
             QFrame#eventSummary {
-                background: #f8fafc;
-                border: 1px solid #e2e8f0;
-                border-radius: 5px;
+                background: #eef2f7;
+                border: none;
+                border-radius: 0;
             }
             QLabel#eventSummaryLabel {
                 color: #475569;
@@ -4535,10 +4689,20 @@ class MainWindow(QMainWindow):
                 font-size: 11px;
                 font-weight: 700;
             }
+            QLabel#recipeDetailsTitle {
+                color: #1e293b;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QLabel#recipeDetailsStep {
+                color: #64748b;
+                font-size: 11px;
+            }
             QDoubleSpinBox#recipeMixtureInput {
                 min-height: 0;
                 max-height: 24px;
                 padding: 0 4px;
+                border-radius: 4px;
             }
             QPushButton#recipeMixtureButton {
                 color: #1d4ed8;
@@ -4558,11 +4722,13 @@ class MainWindow(QMainWindow):
                 max-height: 22px;
                 padding-top: 0;
                 padding-bottom: 0;
+                border-radius: 4px;
             }
             QLineEdit#recipeEventInput {
                 min-height: 0;
                 max-height: 28px;
                 padding: 0 7px;
+                border-radius: 4px;
             }
             QLabel#recipeIssues {
                 color: #b91c1c;
@@ -4634,6 +4800,24 @@ class MainWindow(QMainWindow):
             QTableWidget#recipeTable::item {
                 border: 0;
                 border-radius: 0;
+                padding: 0 4px;
+            }
+            QTableWidget#recipeTable {
+                background: #ffffff;
+                alternate-background-color: #f6f8fb;
+                border: 1px solid #d9e2ee;
+                border-radius: 0;
+                gridline-color: #d9e2ee;
+            }
+            QTableWidget#recipeTable QHeaderView::section {
+                background: #e8eef5;
+                color: #1f3653;
+                border: 0;
+                border-right: 1px solid #d4deea;
+                border-bottom: 1px solid #d4deea;
+                padding: 5px 4px;
+                font-weight: 700;
+                font-size: 11px;
             }
             QTableWidget#recipeTable::item:selected,
             QTableWidget#recipeTable::item:selected:!active {
@@ -4646,6 +4830,19 @@ class MainWindow(QMainWindow):
                 min-height: 0;
                 max-height: 20px;
                 padding: 0 3px;
+                border: 1px solid #93c5fd;
+                border-radius: 3px;
+                background: #ffffff;
+            }
+            QTableWidget#recipeTable QLineEdit:focus {
+                border: 1px solid #2563eb;
+                border-radius: 3px;
+                background: #ffffff;
+            }
+            QFrame#recipeMixtureBand {
+                background: #f8fafc;
+                border: 0;
+                border-top: 1px solid #dbe3ee;
                 border-radius: 0;
             }
             QHeaderView::section {

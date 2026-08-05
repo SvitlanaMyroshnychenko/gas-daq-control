@@ -49,6 +49,8 @@ class FakeProparMaster:
         }
         self.use_written_setpoints = False
         self.write_requests = []
+        self.capacity_overrides = {}
+        self.capacity_unit_overrides = {}
 
     def get_nodes(self):
         return self.nodes
@@ -58,9 +60,11 @@ class FakeProparMaster:
         address = request["node"]
         name = request["parm_name"]
         values = {
-            "capacity": EXPECTED_MFC_NODES[address - 1].capacity_mln_min,
+            "capacity": self.capacity_overrides.get(
+                address, EXPECTED_MFC_NODES[address - 1].capacity_mln_min
+            ),
             "fluid_name": "AiR",
-            "capacity_unit": "mln/min",
+            "capacity_unit": self.capacity_unit_overrides.get(address, "mln/min"),
             "temperature": 22.0 + address / 10,
             "alarm_info": 0,
             "control_mode": 0,
@@ -188,6 +192,22 @@ class ProparMFCRackTests(unittest.TestCase):
 
         self.assertFalse(verified)
         self.assertIn("serial mismatch", message)
+
+    def test_connect_rejects_a_capacity_that_differs_from_the_configured_rack(self):
+        master = FakeProparMaster()
+        master.capacity_overrides[5] = 150.0
+
+        with patch.object(ProparMFCRack, "_open_master", return_value=master):
+            with self.assertRaisesRegex(ConnectionError, "MFC 5 capacity mismatch"):
+                ProparMFCRack("COM4", 38400, EXPECTED_MFC_NODES)
+
+    def test_connect_rejects_a_non_normalized_flow_unit(self):
+        master = FakeProparMaster()
+        master.capacity_unit_overrides[4] = "ml/min"
+
+        with patch.object(ProparMFCRack, "_open_master", return_value=master):
+            with self.assertRaisesRegex(ConnectionError, "MFC 4 unit mismatch"):
+                ProparMFCRack("COM4", 38400, EXPECTED_MFC_NODES)
 
     def test_discovery_marks_the_verified_port(self):
         master = FakeProparMaster()

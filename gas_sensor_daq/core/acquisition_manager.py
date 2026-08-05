@@ -30,6 +30,11 @@ class AcquisitionManager(QObject):
     multimeter_changed = Signal(str, str)
     mfc_changed = Signal(str, str)
     recipe_step_changed = Signal(int)
+    flow_warning = Signal(str)
+
+    ACTUAL_FLOW_SETTLE_SECONDS = 6.0
+    ACTUAL_FLOW_MIN_TOLERANCE = 1.0
+    ACTUAL_FLOW_REL_TOLERANCE = 0.10
 
     def __init__(self, parent=None, settings=DEFAULT_SETTINGS):
         super().__init__(parent)
@@ -60,6 +65,8 @@ class AcquisitionManager(QObject):
 
         self.recipe_steps = ()
         self.recipe_step_index = -1
+        self.recipe_step_started_monotonic = None
+        self.actual_flow_warning_emitted = False
         self.recipe_timer = QTimer(self)
         self.recipe_timer.setSingleShot(True)
         self.recipe_timer.timeout.connect(self.advance_recipe)
@@ -331,6 +338,8 @@ class AcquisitionManager(QObject):
             f"Experiment step {self.recipe_step_index + 1}/{len(self.recipe_steps)}: "
             f"step total {step['total_setpoint_mln_min']:g} mln/min"
         ))
+        self.recipe_step_started_monotonic = time.monotonic()
+        self.actual_flow_warning_emitted = False
         self.emit_state_changed()
         self.recipe_step_changed.emit(self.recipe_step_index)
         self.recipe_timer.start(step["duration_ms"])
@@ -349,6 +358,8 @@ class AcquisitionManager(QObject):
         self.recipe_timer.stop()
         self.recipe_steps = ()
         self.recipe_step_index = -1
+        self.recipe_step_started_monotonic = None
+        self.actual_flow_warning_emitted = False
         self.active_event = ""
 
     @staticmethod
@@ -370,7 +381,12 @@ class AcquisitionManager(QObject):
         self.invalidate_control_timers()
         self.stop_recipe_execution()
 
-        self.safe_shutdown_controls()
+        shutdown_ok = self.safe_shutdown_controls()
+        if not shutdown_ok:
+            message = (
+                f"{message}. CRITICAL: MFC zero setpoints could not be confirmed; "
+                "verify the rack immediately."
+            )
 
         if self.logger is not None:
             try:
@@ -567,6 +583,14 @@ class AcquisitionManager(QObject):
             self.stop_experiment("Stopped: MFC connection lost")
             return
 
+        alarms = self.active_mfc_alarms(state)
+        if alarms:
+            message = "MFC alarm detected during experiment: " + ", ".join(alarms)
+            self.handle_device_error_message(message)
+            self.write_error_record(message, state)
+            self.stop_experiment("Stopped: MFC alarm; setpoints reset to zero")
+            return
+
         try:
             record = self.multimeter.read(state)
             record.event = self.active_event
@@ -580,6 +604,7 @@ class AcquisitionManager(QObject):
             record.total_actual_mln_min = sum(
                 channel.actual_sccm for channel in channels
             )
+            self.check_actual_total_flow(record)
         except Exception as exc:
             message = self.format_device_error(
                 "Multimeter connection lost during measurement",
@@ -601,6 +626,51 @@ class AcquisitionManager(QObject):
         event = self.consume_pending_events()
         self.state_changed.emit(state)
         self.data_acquired.emit(record.to_dict(), event)
+
+    @staticmethod
+    def active_mfc_alarms(state):
+        """Return human-readable alarms from one six-channel state snapshot."""
+        return [
+            f"MFC {channel.index}" + (
+                f" ({channel.alarm_info})" if channel.alarm_info else ""
+            )
+            for channel in getattr(state, "mfc_channels", ())
+            if channel.alarm_info or str(channel.status).upper() == "ALARM"
+        ]
+
+    def check_actual_total_flow(self, record):
+        """Warn once per step after settling when readback differs materially.
+
+        This is intentionally informational: an automatic stop tolerance must
+        be agreed with the laboratory after observing the real installation.
+        """
+        if (
+            self.recipe_step_index < 0
+            or self.recipe_step_started_monotonic is None
+            or self.actual_flow_warning_emitted
+        ):
+            return
+        if time.monotonic() - self.recipe_step_started_monotonic < self.ACTUAL_FLOW_SETTLE_SECONDS:
+            return
+
+        expected = float(record.total_setpoint_mln_min)
+        actual = float(record.total_actual_mln_min)
+        if expected <= 0:
+            return
+        tolerance = max(
+            self.ACTUAL_FLOW_MIN_TOLERANCE,
+            expected * self.ACTUAL_FLOW_REL_TOLERANCE,
+        )
+        difference = abs(actual - expected)
+        if difference <= tolerance:
+            return
+
+        self.actual_flow_warning_emitted = True
+        self.flow_warning.emit(
+            f"Actual total flow {actual:.2f} mln/min differs from setpoint "
+            f"{expected:.2f} mln/min by {difference:.2f} mln/min "
+            f"(warning threshold {tolerance:.2f} mln/min)."
+        )
 
     def emit_state_changed(self):
         try:

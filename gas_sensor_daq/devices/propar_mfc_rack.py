@@ -5,6 +5,8 @@ from gas_sensor_daq.models.records import ControlState, MFCChannelState
 
 
 RAW_FULL_SCALE = 32000.0
+EXPECTED_CAPACITY_UNIT = "mln/min"
+CAPACITY_ABS_TOLERANCE = 0.05
 
 
 @dataclass(frozen=True)
@@ -19,8 +21,8 @@ class MFCRackDiscovery:
 class ProparMFCRack:
     """Connection to the six verified MFCs on one propar bus.
 
-    Recipe execution remains simulation-only.  The write methods below exist
-    solely for the deliberately narrow, operator-confirmed manual test flow.
+    A real connection is accepted only after serial numbers, capacities, and
+    normalized-flow units have all been verified against the configured rack.
     """
 
     DDE_PARAMETERS = {
@@ -259,13 +261,37 @@ class ProparMFCRack:
         self.channel_metadata = {}
 
     def _read_channel_metadata(self):
-        for expected in self.expected_nodes:
+        for index, expected in enumerate(self.expected_nodes, start=1):
             address = expected.address
             node = self.nodes_by_address[address]
+            capacity = self._finite_or_zero(self._read_float(address, "capacity"))
+            capacity_unit = str(self._read_value(address, "capacity_unit") or "").strip()
+            expected_capacity = float(expected.capacity_mln_min)
+            if capacity <= 0:
+                raise ConnectionError(
+                    f"MFC {index} capacity readback is unavailable or invalid."
+                )
+            if capacity_unit.casefold() != EXPECTED_CAPACITY_UNIT:
+                raise ConnectionError(
+                    f"MFC {index} unit mismatch: read {capacity_unit or 'unavailable'}, "
+                    f"expected {EXPECTED_CAPACITY_UNIT}."
+                )
+            if not math.isclose(
+                capacity,
+                expected_capacity,
+                rel_tol=0,
+                abs_tol=CAPACITY_ABS_TOLERANCE,
+            ):
+                raise ConnectionError(
+                    f"MFC {index} capacity mismatch: read {capacity:g} {capacity_unit}, "
+                    f"expected {expected_capacity:g} {EXPECTED_CAPACITY_UNIT}."
+                )
+            # Use verified device metadata for raw write/readback conversion.
+            self.channel_capacities[index] = capacity
             self.channel_metadata[address] = {
                 "serial": node.get("serial", ""),
-                "capacity": self._finite_or_zero(self._read_float(address, "capacity")),
-                "capacity_unit": str(self._read_value(address, "capacity_unit") or "").strip(),
+                "capacity": capacity,
+                "capacity_unit": capacity_unit,
                 "fluid_name": str(self._read_value(address, "fluid_name") or "").strip(),
             }
 
