@@ -28,7 +28,7 @@ def configure_recipe_table(recipe_table):
 
     header = recipe_table.horizontalHeader()
     header.setSectionResizeMode(0, QHeaderView.Fixed)
-    recipe_table.setColumnWidth(0, 54)
+    recipe_table.setColumnWidth(0, 48)
     for column in range(1, recipe_table.columnCount()):
         header.setSectionResizeMode(column, QHeaderView.Stretch)
 
@@ -41,7 +41,7 @@ def configure_recipe_table(recipe_table):
     ]
     for row_index, row_values in enumerate(defaults):
         for column, value in enumerate(row_values):
-            item = recipe_item(value, editable=column not in (0, 1, 3))
+            item = recipe_item(value, editable=column not in (0, 1))
             item.setTextAlignment(Qt.AlignCenter)
             if column == 1:
                 style_recipe_total_item(item)
@@ -71,7 +71,7 @@ def duplicate_recipe_step(recipe_table):
     for column in range(recipe_table.columnCount()):
         source_item = recipe_table.item(source_row, column)
         item = recipe_item(
-            source_item.text() if source_item else "", editable=column not in (0, 1, 3)
+            source_item.text() if source_item else "", editable=column not in (0, 1)
         )
         item.setTextAlignment(Qt.AlignCenter)
         if column == 1:
@@ -104,7 +104,7 @@ def clear_recipe_steps(recipe_table):
 def populate_recipe_row(recipe_table, row, step_number):
     values = [step_number, "0", "0 min", "0", "0", "0", "0", "0", "0", "0"]
     for column, value in enumerate(values):
-        item = recipe_item(value, editable=column not in (0, 1, 3))
+        item = recipe_item(value, editable=column not in (0, 1))
         item.setTextAlignment(Qt.AlignCenter)
         if column == 1:
             style_recipe_total_item(item)
@@ -146,16 +146,20 @@ def set_recipe_event(recipe_table, row, event_name):
 
 def style_recipe_total_item(item):
     """Visually distinguish the read-only, calculated Step Total column."""
-    item.setData(Qt.BackgroundRole, QColor("#eff6ff"))
+    item.setData(Qt.BackgroundRole, None)
     item.setData(Qt.ForegroundRole, QColor("#1d4ed8"))
     item.setToolTip("Calculated from the six MFC setpoints.")
 
 
 def style_recipe_rh_item(item):
-    """Visually distinguish the read-only humidity derived from MFC4."""
-    item.setData(Qt.BackgroundRole, QColor("#f5f3ff"))
-    item.setData(Qt.ForegroundRole, QColor("#6d28d9"))
-    item.setToolTip("Calculated from MFC4 flow and the target total flow.")
+    """Visually distinguish the editable humidity target for a schedule step."""
+    item.setData(Qt.BackgroundRole, None)
+    try:
+        is_nonzero = abs(float(item.text().replace(",", "."))) > 0.0001
+    except ValueError:
+        is_nonzero = False
+    item.setData(Qt.ForegroundRole, QColor("#7c3aed") if is_nonzero else None)
+    item.setToolTip("Editable RH target. Updating it recalculates MFC4 and MFC6.")
 
 
 def set_recipe_editable(recipe_table, action_buttons, enabled):

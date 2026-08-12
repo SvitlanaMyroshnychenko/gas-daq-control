@@ -35,6 +35,9 @@ class AcquisitionManager(QObject):
     ACTUAL_FLOW_SETTLE_SECONDS = 6.0
     ACTUAL_FLOW_MIN_TOLERANCE = 1.0
     ACTUAL_FLOW_REL_TOLERANCE = 0.10
+    STOP_FLOW_VERIFY_INTERVAL_MS = 1000
+    STOP_FLOW_VERIFY_ATTEMPTS = 15
+    STOP_FLOW_ZERO_TOLERANCE = 0.5
 
     def __init__(self, parent=None, settings=DEFAULT_SETTINGS):
         super().__init__(parent)
@@ -70,6 +73,11 @@ class AcquisitionManager(QObject):
         self.recipe_timer = QTimer(self)
         self.recipe_timer.setSingleShot(True)
         self.recipe_timer.timeout.connect(self.advance_recipe)
+
+        self.stop_flow_verify_attempts = 0
+        self.stop_flow_verify_timer = QTimer(self)
+        self.stop_flow_verify_timer.setInterval(self.STOP_FLOW_VERIFY_INTERVAL_MS)
+        self.stop_flow_verify_timer.timeout.connect(self.verify_stopped_mfc_flow)
 
     def set_acquisition_rate_hz(self, rate_hz):
         if self.acquisition_timer.isActive():
@@ -130,6 +138,7 @@ class AcquisitionManager(QObject):
             )
             return False
 
+        self.stop_flow_verify_timer.stop()
         previous_mfc = self.mfc
         self._close_device(previous_mfc, "Previous MFC close failed")
 
@@ -178,14 +187,19 @@ class AcquisitionManager(QObject):
         filename_stem="experiment",
         experiment_metadata=None,
     ):
+        selected_directory = str(data_directory or self.data_directory).strip()
+        if not selected_directory:
+            raise ValueError("Choose a save location before starting the experiment.")
+
         try:
+            self.stop_flow_verify_timer.stop()
             # Every Start creates a fresh experiment file. Resume/append would
             # need explicit metadata handling and is intentionally not implicit.
             self.multimeter.reset_time()
             self.pending_events = []
             self.active_event = ""
             self.experiment_start_time = datetime.now()
-            self.data_directory = data_directory or self.data_directory
+            self.data_directory = selected_directory
             os.makedirs(self.data_directory, exist_ok=True)
 
             stem = self.sanitize_filename_stem(filename_stem)
@@ -390,12 +404,15 @@ class AcquisitionManager(QObject):
 
         if self.logger is not None:
             try:
+                self.logger.update_metadata(self.experiment_completion_metadata(message))
                 self.logger.close()
             except Exception as exc:
                 self.handle_device_error("Logger close failed", exc)
             self.logger = None
 
         self.experiment_stopped.emit(message)
+        if shutdown_ok:
+            self.start_stop_flow_verification()
 
     def build_experiment_metadata(self, save_format, base_filename, experiment_metadata):
         rate_hz = 1000 / self.acquisition_interval_ms
@@ -409,8 +426,23 @@ class AcquisitionManager(QObject):
             }
             for index, node in enumerate(self.settings.mfc_nodes, start=1)
         ]
+        metadata = dict(experiment_metadata)
+        schedule = metadata.get("schedule")
+        if isinstance(schedule, (list, tuple)):
+            metadata["schedule"] = [
+                {
+                    "step_number": step_number,
+                    **{
+                        key: value
+                        for key, value in step.items()
+                        if key != "target_total_mln_min"
+                    },
+                }
+                for step_number, step in enumerate(schedule, start=1)
+            ]
+
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "data_file_stem": base_filename,
             "format": save_format,
             "started_at": self.experiment_start_time.isoformat(timespec="seconds"),
@@ -419,8 +451,27 @@ class AcquisitionManager(QObject):
             "mfc_mode": self.mfc_mode,
             "mfc_port": self.mfc_port if self.mfc_mode == "real" else "",
             "mfc_channels": channels,
-            **experiment_metadata,
+            **metadata,
         }
+
+    @staticmethod
+    def experiment_completion_metadata(message):
+        text = str(message or "").strip()
+        lower = text.lower()
+        if lower.startswith("experiment completed"):
+            reason = "completed"
+        elif "error" in lower or "failed" in lower or "critical" in lower:
+            reason = "error"
+        else:
+            reason = "stopped"
+
+        metadata = {
+            "ended_at": datetime.now().isoformat(timespec="seconds"),
+            "end_reason": reason,
+        }
+        if reason == "error" and text:
+            metadata["error_message"] = text
+        return metadata
 
     def safe_shutdown_controls(self):
         # Safe shutdown is part of Stop, not only application exit.
@@ -441,9 +492,50 @@ class AcquisitionManager(QObject):
             self.handle_device_error("Safe shutdown failed", exc)
             return False
 
+    def start_stop_flow_verification(self):
+        """Monitor actual MFC flow briefly after a confirmed zero-setpoint command."""
+        self.stop_flow_verify_timer.stop()
+        self.stop_flow_verify_attempts = 0
+        self.stop_flow_verify_timer.start()
+
+    def verify_stopped_mfc_flow(self):
+        self.stop_flow_verify_attempts += 1
+        try:
+            state = self.current_state()
+        except Exception:
+            self.stop_flow_verify_timer.stop()
+            return
+
+        self.state_changed.emit(state)
+        residual = self.residual_mfc_flows(state)
+        if not residual:
+            self.stop_flow_verify_timer.stop()
+            return
+
+        if self.stop_flow_verify_attempts < self.STOP_FLOW_VERIFY_ATTEMPTS:
+            return
+
+        self.stop_flow_verify_timer.stop()
+        channels = ", ".join(
+            f"MFC {index}: {flow:.2f} mln/min" for index, flow in residual
+        )
+        self.flow_warning.emit(
+            "MFC setpoints were reset to zero, but actual flow remains after "
+            f"{self.STOP_FLOW_VERIFY_ATTEMPTS} seconds: {channels}. "
+            "Verify the gas rack and outlet."
+        )
+
+    def residual_mfc_flows(self, state):
+        return [
+            (channel.index, channel.actual_sccm)
+            for channel in getattr(state, "mfc_channels", ())
+            if channel.actual_sccm > self.STOP_FLOW_ZERO_TOLERANCE
+        ]
+
     def close(self):
         self.acquisition_timer.stop()
         self.elapsed_timer.stop()
+        self.stop_flow_verify_timer.stop()
         self.invalidate_control_timers()
         self.stop_recipe_execution()
         if not self.safe_shutdown_controls():
@@ -451,6 +543,10 @@ class AcquisitionManager(QObject):
 
         if self.logger is not None:
             try:
+                self.logger.update_metadata({
+                    "ended_at": datetime.now().isoformat(timespec="seconds"),
+                    "end_reason": "application_closed",
+                })
                 self.logger.close()
             except Exception as exc:
                 self.handle_device_error("Logger close failed", exc)

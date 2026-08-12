@@ -201,6 +201,11 @@ GAS_DAQ_DEFAULT_AIR_FLOW
 GAS_DAQ_DATA_DIR
 ```
 
+Before starting an experiment, choose its output folder with the folder button
+in the application. The app will not start recording until a location is set.
+`GAS_DAQ_DATA_DIR` is an optional deployment override for a laboratory-managed
+default folder.
+
 Older names are still supported as fallback:
 
 ```text

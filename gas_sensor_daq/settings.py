@@ -32,7 +32,8 @@ class DeviceSettings:
     mfc_nodes: tuple[MFCNodeConfig, ...] = EXPECTED_MFC_NODES
     multimeter_resource: str = ""
     default_air_flow_sccm: float = 100.0
-    data_directory: str = "data"
+    # The user selects an output location in the UI before each experiment.
+    data_directory: str = ""
 
 
 def load_device_settings():
@@ -63,7 +64,7 @@ def load_device_settings():
             os.getenv("GAS_DAQ_KEITHLEY_RESOURCE", ""),
         ),
         default_air_flow_sccm=_env_float("GAS_DAQ_DEFAULT_AIR_FLOW", 100.0),
-        data_directory=os.getenv("GAS_DAQ_DATA_DIR", "data"),
+        data_directory=os.getenv("GAS_DAQ_DATA_DIR", "").strip(),
     )
 
 

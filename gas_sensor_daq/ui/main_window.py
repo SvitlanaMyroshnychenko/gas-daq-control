@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListView,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QTableWidget,
     QTableWidgetItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -123,6 +125,7 @@ class MainWindow(QMainWindow):
         self.event_markers = []
         self.completed_experiment_exists = False
         self.max_log_preview_rows = 5
+        self.log_preview_records = []
         self.adjusting_log_columns = False
         self.log_preview_expanded = False
         self.recipe_to_run = ()
@@ -131,6 +134,8 @@ class MainWindow(QMainWindow):
         self.current_file_path = ""
         self.experiment_status_step_index = -1
         self.experiment_step_deadline = None
+        self.experiment_status_state = "idle"
+        self.experiment_last_step_index = -1
         self.experiment_status_timer = QTimer(self)
         self.experiment_status_timer.setInterval(1000)
         self.experiment_status_timer.timeout.connect(self.update_experiment_status)
@@ -162,7 +167,7 @@ class MainWindow(QMainWindow):
         self.rate_input.setAlignment(Qt.AlignCenter)
         self.rate_input.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.rate_input.setObjectName("rateInput")
-        self.rate_input.setFixedSize(38, 32)
+        self.rate_input.setFixedSize(38, 22)
         self.rate_input.valueChanged.connect(self.on_rate_changed)
         self.rate_minus_button = QPushButton()
         self.rate_plus_button = QPushButton()
@@ -173,7 +178,7 @@ class MainWindow(QMainWindow):
             (self.rate_plus_button, self.rate_input.stepUp),
         ):
             button.setObjectName("rateStepButton")
-            button.setFixedSize(38, 32)
+            button.setFixedSize(38, 22)
             button.setIconSize(QSize(14, 14))
             button.clicked.connect(callback)
         self.rate_minus_button.setToolTip("Decrease sampling rate")
@@ -181,10 +186,10 @@ class MainWindow(QMainWindow):
 
         self.rate_unit_label = QLabel("Hz")
         self.rate_unit_label.setObjectName("rateUnitBox")
-        self.rate_unit_label.setFixedSize(26, 32)
+        self.rate_unit_label.setFixedSize(26, 22)
         self.rate_unit_label.setAlignment(Qt.AlignCenter)
         self.rate_control = QWidget()
-        self.rate_control.setFixedHeight(32)
+        self.rate_control.setFixedHeight(22)
         rate_layout = QHBoxLayout()
         rate_layout.setContentsMargins(0, 0, 0, 0)
         rate_layout.setSpacing(2)
@@ -217,7 +222,10 @@ class MainWindow(QMainWindow):
         self.format_selector = QComboBox()
         self.format_selector.setObjectName("toolbarFormatSelector")
         self.format_selector.addItems(["CSV", "Excel"])
-        self.format_selector.setFixedWidth(96)
+        self.format_selector.setView(QListView())
+        self.format_selector.view().setObjectName("toolbarFormatPopup")
+        self.format_selector.setMinimumWidth(0)
+        self.format_selector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.format_selector.setFixedHeight(32)
         self.format_selector.currentTextChanged.connect(self.on_save_format_changed)
         self.update_save_location_display(preview=True)
@@ -308,16 +316,12 @@ class MainWindow(QMainWindow):
         self.scan_mfc_button.setFixedWidth(76)
         self.connect_mfc_button.setFixedWidth(76)
 
-        self.start_button = QPushButton("  Start")
-        self.stop_button = QPushButton("  Stop")
-        self.start_button.setFixedSize(96, 32)
-        self.stop_button.setFixedSize(96, 32)
+        self.start_button = QPushButton("START")
+        self.stop_button = QPushButton("STOP")
+        self.start_button.setFixedSize(84, 32)
+        self.stop_button.setFixedSize(84, 32)
         self.start_button.setObjectName("startButton")
         self.stop_button.setObjectName("stopButton")
-        self.start_button.setIcon(self.create_play_icon(QColor("#15803d")))
-        self.stop_button.setIcon(self.create_stop_icon(QColor("#dc2626")))
-        self.start_button.setIconSize(QSize(20, 20))
-        self.stop_button.setIconSize(QSize(16, 16))
         self.start_button.clicked.connect(self.start_experiment)
         self.stop_button.clicked.connect(
             lambda _checked=False: self.manager.stop_experiment()
@@ -424,13 +428,14 @@ class MainWindow(QMainWindow):
             for index, color in self.mfc_channel_colors.items()
         }
 
-        self.log_table = QTableWidget(0, 6)
+        self.log_table = QTableWidget(0, 7)
         self.log_table.setHorizontalHeaderLabels([
             "Time",
-            "Elapsed (s)",
-            "Resistance (Ohm)",
-            "Actual Flow\n(mln/min)",
-            "Setpoint Flow\n(mln/min)",
+            "Elapsed",
+            "Step",
+            "Resistance\n(Ohm)",
+            "Setpoint total\n(mln/min)",
+            "Actual total\n(mln/min)",
             "Event",
         ])
         self.configure_log_table()
@@ -439,7 +444,7 @@ class MainWindow(QMainWindow):
         self.recipe_table.setHorizontalHeaderLabels([
             "Step",
             "Step Total\n(mln/min)",
-            "Duration\n(s / min)",
+            "Duration\n(s/min)",
             "RH\n(%)",
             "MFC 1",
             "MFC 2",
@@ -448,15 +453,23 @@ class MainWindow(QMainWindow):
             "MFC 5",
             "MFC 6",
         ])
+        for index in range(1, 7):
+            capacity = self.manager.mfc_channel_capacity_sccm(index)
+            self.recipe_table.horizontalHeaderItem(index + 3).setToolTip(
+                f"MFC {index} limit: {capacity:g} mln/min"
+            )
         configure_recipe_table(self.recipe_table)
+        self.recipe_table.setMouseTracking(True)
+        self.recipe_table.viewport().setMouseTracking(True)
         self.recipe_table.setToolTip(
             "All MFC flow values in this schedule are mln/min."
         )
-        # Keep the schedule compact at five visible steps; additional steps scroll.
-        self.recipe_table.setFixedHeight(174)
+        # Keep five rows visible while leaving room for the two-line header.
+        self.recipe_table.setFixedHeight(196)
         self.recipe_table.itemChanged.connect(self.update_recipe_total)
         self.recipe_table.itemChanged.connect(self.validate_recipe_live)
         self.recipe_table.itemChanged.connect(self.update_experiment_status)
+        self.recipe_table.cellEntered.connect(self.show_recipe_row_event_tooltip)
 
         self.recipe_add_button = QPushButton("Add Step")
         self.recipe_duplicate_button = QPushButton("Duplicate")
@@ -475,6 +488,15 @@ class MainWindow(QMainWindow):
             "Event recorded in the log when the selected step begins."
         )
         self.recipe_event_input.editingFinished.connect(self.commit_recipe_event)
+        self.recipe_duration_input = QLineEdit()
+        self.recipe_duration_input.setObjectName("recipeDurationInput")
+        self.recipe_duration_input.setPlaceholderText("30 s or 2 min")
+        self.recipe_duration_input.setFixedWidth(56)
+        self.recipe_duration_input.setFixedHeight(24)
+        self.recipe_duration_input.setToolTip(
+            "Duration for the selected step. Use an explicit unit, for example 30 s or 2 min."
+        )
+        self.recipe_duration_input.editingFinished.connect(self.commit_recipe_duration)
         self.recipe_rh_input = self.recipe_mixture_input(0.0, 100.0, 0.0)
         self.recipe_rh_input.setSuffix(" %")
         self.recipe_gas_inputs = {
@@ -504,7 +526,7 @@ class MainWindow(QMainWindow):
         )
         for input_widget in self.recipe_mixture_inputs:
             input_widget.valueChanged.connect(self.update_recipe_mfc6_remainder)
-        self.recipe_target_total_label = QLabel("Target total")
+        self.recipe_target_total_label = QLabel("Target total:")
         self.recipe_target_total_label.setObjectName("recipeMaxTotal")
         self.recipe_target_total_input = QDoubleSpinBox()
         self.recipe_target_total_input.setObjectName("recipeTargetTotal")
@@ -559,9 +581,9 @@ class MainWindow(QMainWindow):
         body_layout = QHBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(8)
-        body_layout.addWidget(self.scroll_panel(self.create_left_panel()), 0)
-        body_layout.addWidget(self.scroll_panel(self.create_center_panel()), 1)
-        body_layout.addWidget(self.scroll_panel(self.create_right_panel()), 0)
+        body_layout.addWidget(self.scroll_panel(self.create_left_panel()), 1)
+        body_layout.addWidget(self.scroll_panel(self.create_center_panel()), 2)
+        body_layout.addWidget(self.scroll_panel(self.create_right_panel()), 1)
 
         root_layout.addLayout(body_layout, 1)
         root.setLayout(root_layout)
@@ -570,11 +592,15 @@ class MainWindow(QMainWindow):
         self.apply_styles()
         self.on_multimeter_mode_changed(self.multimeter_mode_selector.currentText())
         self.on_mfc_mode_changed(self.mfc_mode_selector.currentText())
+        self.update_experiment_status()
 
     def connect_manager_signals(self):
         self.manager.experiment_started.connect(self.on_experiment_started)
         self.manager.experiment_stopped.connect(self.on_experiment_stopped)
         self.manager.elapsed_changed.connect(self.elapsed_label.setText)
+        self.manager.elapsed_changed.connect(
+            lambda _elapsed: self.update_experiment_status()
+        )
         self.manager.data_acquired.connect(self.on_data_acquired)
         self.manager.state_changed.connect(self.refresh_state_label)
         self.manager.device_error.connect(self.on_device_error)
@@ -595,21 +621,17 @@ class MainWindow(QMainWindow):
         controls = QFrame()
         controls.setObjectName("toolbarControls")
         self.toolbar_controls = controls
-        self.toolbar_status_group = self.toolbar_inline_group("Status", self.status_label, 141)
-        self.toolbar_elapsed_group = self.toolbar_inline_group("Elapsed", self.elapsed_label, 125)
-        self.toolbar_rate_group = self.toolbar_inline_group("Rate", self.rate_control, 199)
         save_location = self.save_location_control()
-        save_location.setFixedWidth(220)
-        self.toolbar_save_group = self.toolbar_inline_group("Save to", save_location, 273)
-        self.toolbar_format_group = self.toolbar_inline_group("Save as", self.format_selector, 149)
-        self.toolbar_run_group = self.toolbar_cluster(
-            self.toolbar_status_group,
-            self.toolbar_elapsed_group,
-            self.toolbar_rate_group,
-        )
-        self.toolbar_storage_group = self.toolbar_cluster(self.toolbar_save_group)
-        self.toolbar_actions_group = self.toolbar_cluster(
+        save_location.setFixedWidth(300)
+        self.toolbar_save_group = self.toolbar_inline_group("File:", save_location, 341)
+        format_control = self.format_control()
+        format_control.setFixedWidth(120)
+        self.toolbar_format_group = self.toolbar_inline_group("Format:", format_control, 177)
+        self.toolbar_storage_group = self.toolbar_cluster(
+            self.toolbar_save_group,
             self.toolbar_format_group,
+        )
+        self.toolbar_actions_group = self.toolbar_cluster(
             self.start_button,
             self.stop_button,
         )
@@ -618,7 +640,11 @@ class MainWindow(QMainWindow):
         self.toolbar_controls_layout.setContentsMargins(12, 10, 12, 10)
         self.toolbar_controls_layout.setHorizontalSpacing(6)
         self.toolbar_controls_layout.setVerticalSpacing(8)
+        self.toolbar_file_path_label = QLabel()
+        self.toolbar_file_path_label.setObjectName("toolbarFilePath")
+        self.toolbar_file_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         controls.setLayout(self.toolbar_controls_layout)
+        self.update_save_location_display(preview=True)
 
         layout.addWidget(controls)
         layout.addWidget(self.toolbar_message_bar())
@@ -640,8 +666,8 @@ class MainWindow(QMainWindow):
         layout.setSpacing(5)
         label = QLabel(title)
         label.setObjectName("toolbarInlineLabel")
-        label.setFixedWidth(48)
-        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        label.setFixedWidth(52 if title == "Format:" else 36)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(label)
         layout.addWidget(content, 1 if expanding else 0)
         group.setLayout(layout)
@@ -704,16 +730,14 @@ class MainWindow(QMainWindow):
         for row in self.toolbar_rows:
             row.hide()
 
-        self.toolbar_controls.setFixedHeight(56)
+        self.toolbar_controls.setFixedHeight(80)
         self.populate_toolbar_row(
             self.toolbar_rows[0],
-            (self.toolbar_run_group,),
-            (
-                self.toolbar_storage_group,
-                self.toolbar_actions_group,
-            ),
+            (self.toolbar_storage_group,),
+            (self.toolbar_actions_group,),
         )
         layout.addWidget(self.toolbar_rows[0], 0, 0, 1, 10)
+        layout.addWidget(self.toolbar_file_path_label, 1, 0, 1, 10)
 
         self.update_toolbar_height()
 
@@ -756,13 +780,47 @@ class MainWindow(QMainWindow):
         return section
 
     def save_location_control(self):
-        control = QWidget()
+        control = QFrame()
+        control.setObjectName("fileLocationControl")
         control.setFixedHeight(32)
         layout = QHBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
+        layout.setContentsMargins(8, 0, 0, 0)
+        layout.setSpacing(7)
+
+        icon_label = QLabel()
+        icon_label.setObjectName("fileLocationIcon")
+        icon_label.setFixedSize(18, 18)
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setPixmap(
+            self.style().standardIcon(QStyle.SP_FileIcon).pixmap(QSize(16, 16))
+        )
+
+        self.choose_save_location_button.setObjectName("fileLocationBrowseButton")
         layout.addWidget(self.save_location_input, 1)
         layout.addWidget(self.choose_save_location_button)
+        layout.insertWidget(0, icon_label)
+        control.setLayout(layout)
+        return control
+
+    def format_control(self):
+        control = QFrame()
+        control.setObjectName("formatControl")
+        control.setFixedHeight(32)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(8, 0, 2, 0)
+        layout.setSpacing(5)
+
+        icon_label = QLabel()
+        icon_label.setObjectName("formatControlIcon")
+        icon_label.setFixedSize(16, 16)
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setPixmap(
+            self.style().standardIcon(QStyle.SP_FileIcon).pixmap(QSize(14, 14))
+        )
+
+        layout.addWidget(icon_label)
+        layout.addWidget(self.format_selector, 1)
         control.setLayout(layout)
         return control
 
@@ -977,8 +1035,7 @@ class MainWindow(QMainWindow):
 
     def create_left_panel(self):
         panel = QWidget()
-        panel.setMinimumWidth(310)
-        panel.setMaximumWidth(335)
+        panel.setMinimumWidth(305)
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -987,10 +1044,26 @@ class MainWindow(QMainWindow):
         readings_layout = QVBoxLayout()
         readings_layout.setContentsMargins(0, 0, 0, 0)
         readings_layout.setSpacing(0)
-        readings_layout.addWidget(self.reading_row("Resistance", self.resistance_value_label, "#2563eb"))
-        readings_layout.addWidget(self.reading_row("Rack capacity", self.max_total_flow_label, "#64748b"))
-        readings_layout.addWidget(self.reading_row("Current setpoint flow", self.air_actual_label, "#0f9f9a"))
-        readings_layout.addWidget(self.reading_row("Current actual flow", self.nh3_actual_label, "#7c3aed"))
+        readings_layout.addWidget(
+            self.reading_row(
+                "Resistance", "Sensor measurement", self.resistance_value_label, "#2563eb"
+            )
+        )
+        readings_layout.addWidget(
+            self.reading_row(
+                "Rack capacity", "Maximum available flow", self.max_total_flow_label, "#64748b"
+            )
+        )
+        readings_layout.addWidget(
+            self.reading_row(
+                "Current setpoint flow", "Target flow", self.air_actual_label, "#0f9f9a"
+            )
+        )
+        readings_layout.addWidget(
+            self.reading_row(
+                "Current actual flow", "Measured flow", self.nh3_actual_label, "#7c3aed"
+            )
+        )
         readings_card = self.compact_section_card(
             "Current Readings",
             readings_layout,
@@ -1104,43 +1177,45 @@ class MainWindow(QMainWindow):
         recipe_layout.setSpacing(8)
         recipe_layout.addWidget(self.recipe_table)
 
-        recipe_actions = QWidget()
-        recipe_actions_layout = QVBoxLayout()
-        recipe_actions_layout.setContentsMargins(0, 0, 0, 0)
-        recipe_actions_layout.setSpacing(5)
-        recipe_event_actions = QHBoxLayout()
-        recipe_event_actions.setContentsMargins(0, 0, 0, 0)
-        recipe_event_actions.setSpacing(5)
-        recipe_event_actions.addWidget(QLabel("Event"))
-        recipe_event_actions.addWidget(self.recipe_event_input)
-        recipe_event_actions.addStretch()
-        recipe_actions_layout.addLayout(recipe_event_actions)
+        # These controls are part of the schedule itself, so they remain
+        # available even when the selected-step mixture details are hidden.
+        recipe_event_actions = QWidget()
+        recipe_event_actions_layout = QHBoxLayout()
+        recipe_event_actions_layout.setContentsMargins(0, 0, 0, 0)
+        recipe_event_actions_layout.setSpacing(5)
+        recipe_event_actions_layout.addWidget(QLabel("Event"))
+        recipe_event_actions_layout.addWidget(self.recipe_event_input)
+        recipe_event_actions_layout.addStretch()
+        for button in self.recipe_action_buttons:
+            recipe_event_actions_layout.addWidget(button)
+        recipe_event_actions.setLayout(recipe_event_actions_layout)
 
         recipe_mixture_band = QFrame()
         recipe_mixture_band.setObjectName("recipeMixtureBand")
         recipe_mixture_layout = QVBoxLayout()
-        recipe_mixture_layout.setContentsMargins(0, 8, 0, 8)
-        recipe_mixture_layout.setSpacing(4)
+        recipe_mixture_layout.setContentsMargins(10, 8, 10, 8)
+        recipe_mixture_layout.setSpacing(8)
         mixture_primary_row = QHBoxLayout()
         mixture_primary_row.setContentsMargins(0, 0, 0, 0)
-        mixture_primary_row.setSpacing(6)
-        mixture_title = QLabel("Selected-step mixture")
+        mixture_primary_row.setSpacing(8)
+        mixture_title = QLabel("Mixture:")
         mixture_title.setObjectName("recipeMixtureTitle")
         mixture_primary_row.addWidget(mixture_title)
         for label, widget in (
             ("RH", self.recipe_rh_input),
-            ("Gas 1", self.recipe_gas_inputs[1]),
-            ("Gas 2", self.recipe_gas_inputs[2]),
-            ("Gas 3", self.recipe_gas_inputs[3]),
+            ("MFC 1", self.recipe_gas_inputs[1]),
+            ("MFC 2", self.recipe_gas_inputs[2]),
+            ("MFC 3", self.recipe_gas_inputs[3]),
         ):
-            mixture_primary_row.addWidget(QLabel(label))
+            field_label = QLabel(label)
+            mixture_primary_row.addWidget(field_label)
             mixture_primary_row.addWidget(widget)
         mixture_primary_row.addStretch()
 
         mixture_dry_air_row = QHBoxLayout()
         mixture_dry_air_row.setContentsMargins(0, 0, 0, 0)
-        mixture_dry_air_row.setSpacing(6)
-        dry_air_title = QLabel("Dry-air allocation")
+        mixture_dry_air_row.setSpacing(8)
+        dry_air_title = QLabel("Dry-air allocation:")
         dry_air_title.setObjectName("recipeMixtureTitle")
         mixture_dry_air_row.addWidget(dry_air_title)
         mixture_dry_air_row.addWidget(QLabel("MFC5 dry"))
@@ -1148,14 +1223,30 @@ class MainWindow(QMainWindow):
         mixture_dry_air_row.addWidget(QLabel("MFC6 remainder"))
         mixture_dry_air_row.addWidget(self.recipe_mfc6_remainder_label)
         mixture_dry_air_row.addStretch()
-        mixture_dry_air_row.addWidget(self.recipe_apply_mixture_button)
+
+        mixture_action_row = QHBoxLayout()
+        mixture_action_row.setContentsMargins(0, 0, 0, 0)
+        mixture_action_row.setSpacing(8)
+        duration_label = QLabel("Duration:")
+        duration_label.setObjectName("recipeMixtureTitle")
+        mixture_action_row.addWidget(duration_label)
+        mixture_action_row.addWidget(self.recipe_duration_input)
+        mixture_action_row.addStretch()
+        mixture_action_row.addWidget(self.recipe_apply_mixture_button)
+
+        mixture_formula = QLabel(
+            "Formula: MFC4 = target x RH / 100; MFC6 = target - (MFC1 + MFC2 + MFC3 + MFC4 + MFC5). "
+            "Enter RH, MFC1-3, and MFC5 manually; MFC4 and MFC6 are calculated automatically."
+        )
+        mixture_formula.setObjectName("recipeMixtureFormula")
+        mixture_formula.setWordWrap(True)
         recipe_mixture_layout.addLayout(mixture_primary_row)
         recipe_mixture_layout.addLayout(mixture_dry_air_row)
+        recipe_mixture_layout.addLayout(mixture_action_row)
+        recipe_mixture_layout.addWidget(mixture_formula)
         recipe_mixture_band.setLayout(recipe_mixture_layout)
-        recipe_actions_layout.addWidget(recipe_mixture_band)
-        recipe_actions.setLayout(recipe_actions_layout)
 
-        self.recipe_details_title = QLabel("Step details")
+        self.recipe_details_title = QLabel("Mixture Calculator")
         self.recipe_details_title.setObjectName("recipeDetailsTitle")
         self.recipe_details_step_label = QLabel("Selected: step 1")
         self.recipe_details_step_label.setObjectName("recipeDetailsStep")
@@ -1173,14 +1264,10 @@ class MainWindow(QMainWindow):
         recipe_details_header_layout.addWidget(self.recipe_details_title)
         recipe_details_header_layout.addWidget(self.recipe_details_step_label)
         recipe_details_header_layout.addStretch()
-        for button in self.recipe_action_buttons:
-            recipe_details_header_layout.addWidget(button)
         recipe_details_header_layout.addWidget(self.recipe_details_chevron)
         recipe_details_header.setLayout(recipe_details_header_layout)
 
-        self.recipe_details_content = recipe_actions
-        recipe_layout.addWidget(recipe_details_header)
-        recipe_layout.addWidget(self.recipe_details_content)
+        self.recipe_details_content = recipe_mixture_band
 
         recipe_target_control = QWidget()
         recipe_target_control_layout = QHBoxLayout()
@@ -1190,14 +1277,30 @@ class MainWindow(QMainWindow):
         recipe_target_control_layout.addWidget(self.recipe_target_total_unit_label)
         recipe_target_control.setLayout(recipe_target_control_layout)
 
+        recipe_schedule_settings = QWidget()
+        recipe_schedule_settings_layout = QHBoxLayout()
+        recipe_schedule_settings_layout.setContentsMargins(0, 0, 0, 0)
+        recipe_schedule_settings_layout.setSpacing(5)
+        recipe_schedule_settings_layout.addWidget(self.recipe_target_total_label)
+        recipe_schedule_settings_layout.addWidget(recipe_target_control)
+        recipe_schedule_settings_layout.addSpacing(18)
+        sampling_rate_label = QLabel("Sampling rate:")
+        sampling_rate_label.setObjectName("recipeMixtureTitle")
+        recipe_schedule_settings_layout.addWidget(sampling_rate_label)
+        recipe_schedule_settings_layout.addWidget(self.rate_control)
+        recipe_schedule_settings_layout.addStretch()
+        recipe_schedule_settings.setLayout(recipe_schedule_settings_layout)
+
+        recipe_layout.addWidget(recipe_schedule_settings)
+        recipe_layout.addWidget(recipe_event_actions)
+        recipe_layout.addWidget(recipe_details_header)
+        recipe_layout.addWidget(self.recipe_details_content)
+
         recipe_header_controls = QWidget()
         recipe_header_controls_layout = QHBoxLayout()
         recipe_header_controls_layout.setContentsMargins(0, 0, 0, 0)
         recipe_header_controls_layout.setSpacing(5)
         recipe_header_controls_layout.addWidget(self.recipe_issues_label)
-        recipe_header_controls_layout.addSpacing(16)
-        recipe_header_controls_layout.addWidget(self.recipe_target_total_label)
-        recipe_header_controls_layout.addWidget(recipe_target_control)
         recipe_header_controls.setLayout(recipe_header_controls_layout)
 
         self.recipe_chevron = QPushButton()
@@ -1226,7 +1329,7 @@ class MainWindow(QMainWindow):
         self.recipe_card_widget = recipe_card
         self.recipe_content_frame = recipe_card.content_frame
         self.recipe_header_controls = recipe_header_controls
-        recipe_card.setMinimumHeight(352)
+        recipe_card.setMinimumHeight(488)
         self.recipe_details_expanded = True
         self.set_recipe_schedule_expanded(True)
         self.set_recipe_details_expanded(False)
@@ -1239,8 +1342,7 @@ class MainWindow(QMainWindow):
 
     def create_right_panel(self):
         panel = QWidget()
-        panel.setMinimumWidth(310)
-        panel.setMaximumWidth(320)
+        panel.setMinimumWidth(305)
         panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1267,102 +1369,63 @@ class MainWindow(QMainWindow):
         )
 
         layout.addWidget(devices_card, 0, Qt.AlignTop)
-        layout.addWidget(self.create_manual_mfc_test_card(), 0, Qt.AlignTop)
         layout.addWidget(self.create_experiment_status_card(), 0, Qt.AlignTop)
         layout.addStretch()
         panel.setLayout(layout)
         return panel
 
     def create_experiment_status_card(self):
-        content = QVBoxLayout()
-        content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(0)
+        card = QFrame()
+        card.setObjectName("experimentStatusCard")
+        card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        self.experiment_step_value = self.experiment_status_value("--")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 11)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("Experiment Status")
+        title.setObjectName("sectionTitle")
+        self.experiment_state_badge = QLabel("IDLE")
+        self.experiment_state_badge.setObjectName("experimentStateBadge")
+        self.experiment_state_badge.setAlignment(Qt.AlignCenter)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.experiment_state_badge)
+        layout.addLayout(header)
+
+        self.experiment_step_caption = QLabel("Step")
+        self.experiment_step_caption.setObjectName("experimentStatusCaption")
+        self.experiment_step_value = self.experiment_status_value("Not started")
+        self.experiment_event_value = QLabel("0 of 0 steps")
+        self.experiment_event_value.setObjectName("experimentEventValue")
+        layout.addWidget(self.experiment_step_caption)
+        layout.addWidget(self.experiment_step_value)
+        layout.addWidget(self.experiment_event_value)
+
+        self.experiment_time_caption = QLabel("Time remaining")
+        self.experiment_time_caption.setObjectName("experimentStatusCaption")
         self.experiment_remaining_value = self.experiment_status_value(
-            "--", "experimentTimeValue"
+            "--:--:--", "experimentTimeValue"
         )
-        self.experiment_total_time_value = self.experiment_status_value(
-            "--", "experimentTimeValue"
-        )
+        self.experiment_progress = QProgressBar()
+        self.experiment_progress.setObjectName("experimentProgress")
+        self.experiment_progress.setRange(0, 100)
+        self.experiment_progress.setValue(0)
+        self.experiment_progress.setTextVisible(False)
+        layout.addWidget(self.experiment_time_caption)
+        layout.addWidget(self.experiment_remaining_value)
+        layout.addWidget(self.experiment_progress)
 
-        content.addWidget(self.state_row("Step", self.experiment_step_value))
-        content.addWidget(self.state_row("Remaining", self.experiment_remaining_value))
-        content.addWidget(self.state_row("Total time", self.experiment_total_time_value))
-
-        return self.compact_section_card(
-            "Experiment Status", content, title_accent="#2563eb"
-        )
-
-    def create_manual_mfc_test_card(self):
-        content = QVBoxLayout()
-        content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(6)
-
-        self.manual_mfc_channel_selector = QComboBox()
-        for index in range(1, 7):
-            self.manual_mfc_channel_selector.addItem(f"MFC {index}", index)
-        self.manual_mfc_channel_selector.setObjectName("manualMfcChannel")
-        self.manual_mfc_channel_selector.currentIndexChanged.connect(
-            self.update_manual_mfc_test_limit
-        )
-
-        self.manual_mfc_flow_input = QDoubleSpinBox()
-        self.manual_mfc_flow_input.setObjectName("manualMfcFlow")
-        self.manual_mfc_flow_input.setDecimals(2)
-        self.manual_mfc_flow_input.setSingleStep(0.1)
-        self.manual_mfc_flow_input.setValue(1.0)
-
-        self.manual_mfc_apply_button = QPushButton("Apply test flow")
-        self.manual_mfc_apply_button.setObjectName("manualMfcApplyButton")
-        self.manual_mfc_apply_button.clicked.connect(self.apply_manual_mfc_test)
-        self.manual_mfc_zero_button = QPushButton("Zero all MFCs")
-        self.manual_mfc_zero_button.setObjectName("manualMfcZeroButton")
-        self.manual_mfc_zero_button.clicked.connect(self.confirm_zero_all_mfcs)
-
-        channel_row = QHBoxLayout()
-        channel_row.setContentsMargins(0, 0, 0, 0)
-        channel_row.setSpacing(6)
-        channel_label = QLabel("Channel")
-        channel_label.setObjectName("manualMfcLabel")
-        channel_row.addWidget(channel_label)
-        channel_row.addWidget(self.manual_mfc_channel_selector, 1)
-
-        flow_row = QHBoxLayout()
-        flow_row.setContentsMargins(0, 0, 0, 0)
-        flow_row.setSpacing(6)
-        flow_label = QLabel("Test flow")
-        flow_label.setObjectName("manualMfcLabel")
-        flow_unit = QLabel("mln/min")
-        flow_unit.setObjectName("manualMfcUnit")
-        flow_row.addWidget(flow_label)
-        flow_row.addWidget(self.manual_mfc_flow_input, 1)
-        flow_row.addWidget(flow_unit)
-
-        self.manual_mfc_test_state = QLabel(
-            "Connect a verified real rack to enable manual testing."
-        )
-        self.manual_mfc_test_state.setObjectName("manualMfcHint")
-        self.manual_mfc_test_state.setWordWrap(True)
-
-        actions = QHBoxLayout()
-        actions.setContentsMargins(0, 2, 0, 0)
-        actions.setSpacing(6)
-        actions.addWidget(self.manual_mfc_apply_button, 1)
-        actions.addWidget(self.manual_mfc_zero_button, 1)
-
-        content.addLayout(channel_row)
-        content.addLayout(flow_row)
-        content.addWidget(self.manual_mfc_test_state)
-        content.addLayout(actions)
-
-        card = self.compact_section_card(
-            "Manual MFC Test", content, title_accent="#d97706"
-        )
-        card.setObjectName("manualMfcTestCard")
-        self.manual_mfc_test_card = card
-        self.update_manual_mfc_test_limit()
-        self.update_manual_mfc_test_controls()
+        details = QVBoxLayout()
+        details.setSpacing(0)
+        self.experiment_sampling_rate_value = self.experiment_status_value("--")
+        self.experiment_total_time_value = self.experiment_status_value("--")
+        self.experiment_elapsed_value = self.experiment_status_value("00:00:00")
+        details.addWidget(self.state_row("Sampling rate", self.experiment_sampling_rate_value))
+        details.addWidget(self.state_row("Planned", self.experiment_total_time_value))
+        details.addWidget(self.state_row("Elapsed", self.experiment_elapsed_value))
+        layout.addLayout(details)
         return card
 
     @staticmethod
@@ -1383,10 +1446,9 @@ class MainWindow(QMainWindow):
         table_header = QGridLayout()
         table_header.setContentsMargins(4, 2, 4, 1)
         table_header.setHorizontalSpacing(8)
-        table_header.setColumnMinimumWidth(0, 68)
-        table_header.setColumnMinimumWidth(1, 55)
-        table_header.setColumnMinimumWidth(2, 60)
-        table_header.setColumnMinimumWidth(3, 70)
+        table_header.setColumnMinimumWidth(0, 0)
+        table_header.setColumnMinimumWidth(1, 0)
+        table_header.setColumnMinimumWidth(2, 0)
         table_header.setColumnStretch(0, 1)
         table_header.setColumnStretch(1, 1)
         table_header.setColumnStretch(2, 1)
@@ -1394,11 +1456,10 @@ class MainWindow(QMainWindow):
             "Channel",
             "Actual\n(mln/min)",
             "Setpoint\n(mln/min)",
-            "Status",
         )):
             label = QLabel(text)
             label.setObjectName("mfcMonitorHeader")
-            if column in (1, 2, 3):
+            if column in (1, 2):
                 label.setAlignment(Qt.AlignCenter)
             table_header.addWidget(label, 0, column)
         content.addLayout(table_header)
@@ -1407,45 +1468,66 @@ class MainWindow(QMainWindow):
         for index in range(1, 7):
             row = QFrame()
             row.setObjectName("mfcChannelMonitorRow")
-            row.setFixedHeight(36)
+            row.setFixedHeight(42)
 
             row_layout = QGridLayout()
             row_layout.setContentsMargins(4, 4, 4, 4)
             row_layout.setHorizontalSpacing(8)
-            row_layout.setColumnMinimumWidth(0, 68)
-            row_layout.setColumnMinimumWidth(1, 55)
-            row_layout.setColumnMinimumWidth(2, 60)
-            row_layout.setColumnMinimumWidth(3, 70)
+            row_layout.setColumnMinimumWidth(0, 0)
+            row_layout.setColumnMinimumWidth(1, 0)
+            row_layout.setColumnMinimumWidth(2, 0)
             row_layout.setColumnStretch(0, 1)
             row_layout.setColumnStretch(1, 1)
             row_layout.setColumnStretch(2, 1)
 
+            channel_cell = QWidget()
+            channel_layout = QVBoxLayout()
+            channel_layout.setContentsMargins(0, 0, 0, 0)
+            channel_layout.setSpacing(0)
+
+            channel_line = QHBoxLayout()
+            channel_line.setContentsMargins(0, 0, 0, 0)
+            channel_line.setSpacing(5)
             channel_label = QLabel(f"MFC {index}")
             channel_label.setObjectName("mfcChannelName")
             channel_label.setProperty("channel", str(index))
+            channel_line.addWidget(channel_label)
+            channel_line.addStretch()
+
+            detail_label = QLabel()
+            detail_label.setObjectName("mfcChannelSerial")
+            detail_label.setProperty("state", "serial")
+            detail_label.setVisible(False)
+            channel_layout.addLayout(channel_line)
+            channel_layout.addWidget(detail_label)
+            channel_cell.setLayout(channel_layout)
+
             actual_label = QLabel("--")
             actual_label.setObjectName("mfcChannelValue")
             actual_label.setAlignment(Qt.AlignCenter)
             setpoint_label = QLabel("--")
             setpoint_label.setObjectName("mfcChannelValue")
             setpoint_label.setAlignment(Qt.AlignCenter)
-            status_label = QLabel("Waiting")
-            status_label.setObjectName("mfcChannelStatus")
-            status_label.setProperty("state", "waiting")
-            status_label.setAlignment(Qt.AlignCenter)
-
-            row_layout.addWidget(channel_label, 0, 0)
+            row_layout.addWidget(channel_cell, 0, 0)
             row_layout.addWidget(actual_label, 0, 1)
             row_layout.addWidget(setpoint_label, 0, 2)
-            row_layout.addWidget(status_label, 0, 3, Qt.AlignRight)
             row.setLayout(row_layout)
             content.addWidget(row)
             self.mfc_channel_monitor[index] = {
                 "row": row,
                 "actual": actual_label,
                 "setpoint": setpoint_label,
-                "status": status_label,
+                "detail": detail_label,
             }
+
+        self.zero_mfc_setpoints_button = QPushButton("Zero all setpoints")
+        self.zero_mfc_setpoints_button.setObjectName("mfcZeroButton")
+        self.zero_mfc_setpoints_button.setToolTip(
+            "Set all MFC setpoints to zero when no experiment is running"
+        )
+        self.zero_mfc_setpoints_button.clicked.connect(self.zero_mfc_setpoints)
+        content.addSpacing(4)
+        content.addWidget(self.zero_mfc_setpoints_button)
 
         return self.compact_section_card("MFC Monitor", content)
 
@@ -1723,26 +1805,42 @@ class MainWindow(QMainWindow):
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         return label
 
-    def reading_row(self, name, value_label, color):
+    def reading_row(self, name, description, value_label, color):
         row = QFrame()
         row.setObjectName("compactReadingRow")
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setContentsMargins(0, 5, 0, 5)
         layout.setSpacing(8)
-
-        dot = QFrame()
-        dot.setObjectName("compactReadingMarker")
-        dot.setStyleSheet(f"background: {color}; border: none; border-radius: 0px;")
-        dot.setFixedSize(12, 4)
 
         name_label = QLabel(name)
         name_label.setObjectName("compactReadingName")
 
-        value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        description_label = QLabel(description)
+        description_label.setObjectName("compactReadingDescription")
 
-        layout.addWidget(dot)
-        layout.addWidget(name_label)
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(0)
+        text_layout.addWidget(name_label)
+        text_layout.addWidget(description_label)
+
+        value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        value_label.setProperty("compactMetric", True)
+        value_label.setProperty("readingMetric", False)
+        value_label.setProperty(
+            "readingColor",
+            {
+                "#2563eb": "blue",
+                "#64748b": "slate",
+                "#0f9f9a": "teal",
+                "#7c3aed": "purple",
+            }[color],
+        )
+        value_label.style().unpolish(value_label)
+        value_label.style().polish(value_label)
+
+        layout.addLayout(text_layout)
         layout.addStretch()
         layout.addWidget(value_label)
 
@@ -1991,13 +2089,14 @@ class MainWindow(QMainWindow):
         self.log_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.log_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.log_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.log_table.setObjectName("logPreviewTable")
         self.log_table.setMinimumHeight(160)
 
         header = self.log_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(False)
-        header.setMinimumSectionSize(58)
-        for column, width in enumerate((70, 85, 125, 110, 105, 95)):
+        header.setMinimumSectionSize(52)
+        for column, width in enumerate((110, 68, 56, 100, 118, 118, 190)):
             self.log_table.setColumnWidth(column, width)
         header.sectionResized.connect(self.on_log_section_resized)
         self.log_table.viewport().installEventFilter(self)
@@ -2015,7 +2114,7 @@ class MainWindow(QMainWindow):
         self.adjusting_log_columns = True
         try:
             minimum_width = self.log_table.horizontalHeader().minimumSectionSize()
-            ratios = (0.12, 0.15, 0.23, 0.18, 0.18, 0.14)
+            ratios = (0.16, 0.09, 0.07, 0.14, 0.14, 0.14, 0.26)
             used_width = 0
             last_column = self.log_table.columnCount() - 1
 
@@ -2082,10 +2181,8 @@ class MainWindow(QMainWindow):
 
     def on_log_rows_changed(self, value):
         self.max_log_preview_rows = int(value)
+        self.refresh_log_preview()
         self.update_log_preview_height()
-        while self.log_table.rowCount() > self.max_log_preview_rows:
-            self.log_table.removeRow(0)
-        self.log_table.scrollToBottom()
 
     def update_log_preview_height(self):
         if not hasattr(self, "log_card_widget"):
@@ -2096,9 +2193,12 @@ class MainWindow(QMainWindow):
             self.log_card_widget.setMaximumHeight(52)
             return
 
-        self.log_card_widget.setMinimumHeight(235)
+        visible_rows = min(self.max_log_preview_rows, 10)
+        table_height = 34 + visible_rows * self.log_table.verticalHeader().defaultSectionSize()
+        self.log_table.setMinimumHeight(table_height)
+        self.log_card_widget.setMinimumHeight(table_height + 78)
         if self.max_log_preview_rows <= 5:
-            self.log_card_widget.setMaximumHeight(245)
+            self.log_card_widget.setMaximumHeight(table_height + 88)
         else:
             self.log_card_widget.setMaximumHeight(16777215)
 
@@ -2121,7 +2221,7 @@ class MainWindow(QMainWindow):
         self.recipe_chevron.setIcon(self.chevron_icon(expanded=expanded))
 
         if expanded:
-            minimum_height = 352 if self.recipe_details_expanded else 258
+            minimum_height = 488 if self.recipe_details_expanded else 372
             self.recipe_card_widget.setMinimumHeight(minimum_height)
             self.recipe_card_widget.setMaximumHeight(16777215)
             self.recipe_card_widget.setSizePolicy(
@@ -2144,7 +2244,7 @@ class MainWindow(QMainWindow):
         self.recipe_details_chevron.setIcon(self.chevron_icon(expanded=expanded))
 
         if self.recipe_schedule_expanded:
-            self.recipe_card_widget.setMinimumHeight(352 if expanded else 258)
+            self.recipe_card_widget.setMinimumHeight(488 if expanded else 372)
 
     def toggle_recipe_details(self):
         self.set_recipe_details_expanded(not self.recipe_details_expanded)
@@ -2263,6 +2363,7 @@ class MainWindow(QMainWindow):
         for values in self.mfc_flow_data.values():
             values.clear()
         self.clear_event_markers()
+        self.log_preview_records.clear()
         self.log_table.setRowCount(0)
 
         self.resistance_curve.setData([], [])
@@ -2280,6 +2381,9 @@ class MainWindow(QMainWindow):
         )
 
     def open_data_folder(self):
+        if not self.data_directory:
+            self.set_system_message("Choose a save location first.", "warning")
+            return
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.data_directory))
 
     def choose_save_location(self):
@@ -2297,6 +2401,28 @@ class MainWindow(QMainWindow):
         self.data_directory = directory
         self.manager.data_directory = directory
         self.update_save_location_display(preview=True)
+
+    def zero_mfc_setpoints(self):
+        if self.is_experiment_running():
+            QMessageBox.warning(
+                self,
+                "Experiment is running",
+                "Use STOP to end the experiment safely and reset all MFC setpoints.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Zero all MFC setpoints",
+            "Set every MFC setpoint to 0 mln/min?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        if self.manager.safe_shutdown_controls():
+            self.set_system_message("All MFC setpoints were reset to zero.", "stopped")
 
     def on_save_format_changed(self):
         if not self.is_experiment_running():
@@ -2331,7 +2457,12 @@ class MainWindow(QMainWindow):
             file_name = f"{self.filename_stem}_<timestamp>.{extension}"
         elif not file_name:
             file_name = self.filename_stem
-        full_path = str(Path(self.data_directory) / file_name) if file_name else self.data_directory
+        has_save_location = bool(self.data_directory)
+        full_path = (
+            str(Path(self.data_directory) / file_name)
+            if has_save_location and file_name
+            else "No save location selected"
+        )
         display_name = self.filename_stem if preview or not filename else Path(filename).stem
         self.save_location_input.setText(display_name)
         self.save_location_input.setToolTip(
@@ -2340,8 +2471,14 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self, "choose_save_location_button"):
             self.choose_save_location_button.setToolTip(
-                f"Choose save location\nCurrent folder: {self.data_directory}"
+                "Choose save location\n"
+                f"Current folder: {self.data_directory or 'Not selected'}"
             )
+        if hasattr(self, "toolbar_file_path_label"):
+            self.toolbar_file_path_label.setText(
+                f"File path: {self.data_directory or 'Not selected'}"
+            )
+            self.toolbar_file_path_label.setToolTip(full_path)
 
     def open_current_log(self):
         if self.is_experiment_running():
@@ -2416,6 +2553,12 @@ class MainWindow(QMainWindow):
         self.validate_recipe_live()
 
     def ensure_ready_to_start(self):
+        if not self.data_directory:
+            self.on_device_error(
+                "Choose a save location with the folder button before starting the experiment."
+            )
+            return False
+
         # Choosing "Real ..." in the UI is not enough: the device must be
         # connected first so Start cannot silently fall back to simulation.
         if self.is_real_multimeter_mode():
@@ -2438,11 +2581,15 @@ class MainWindow(QMainWindow):
 
     def on_rate_changed(self, rate_hz):
         self.manager.set_acquisition_rate_hz(rate_hz)
+        self.update_experiment_status()
 
     def schedule_steps(self):
         steps = []
         for row in range(self.recipe_table.rowCount()):
             duration_seconds = self.recipe_duration_number(row)
+            rh = self.recipe_number(row, 3, "RH")
+            if rh > 100:
+                raise ValueError(f"Step {row + 1} RH must be between 0 and 100%.")
             setpoints = {
                 index: self.recipe_number(row, index + 3, f"MFC {index}")
                 for index in range(1, 7)
@@ -2476,6 +2623,7 @@ class MainWindow(QMainWindow):
                 "total_setpoint_mln_min": total_setpoint,
                 "target_total_mln_min": target_total,
                 "duration_ms": round(duration_seconds * 1_000),
+                "rh_percent": rh,
                 "setpoints": setpoints,
                 "event_name": recipe_event(self.recipe_table, row),
             })
@@ -2484,13 +2632,20 @@ class MainWindow(QMainWindow):
         return steps
 
     def update_recipe_total(self, changed_item):
+        row = changed_item.row()
+        if changed_item.column() == 3:
+            self.apply_recipe_rh_from_table(row)
+            return
         if changed_item.column() < 4:
             return
 
+        self.update_recipe_total_from_setpoints(row)
+
+    def update_recipe_total_from_setpoints(self, row):
         values = []
         invalid_value = False
         for column in range(4, 10):
-            item = self.recipe_table.item(changed_item.row(), column)
+            item = self.recipe_table.item(row, column)
             raw_value = item.text().strip() if item is not None else ""
             numeric_text = self.recipe_numeric_text(raw_value)
             if numeric_text is None:
@@ -2498,18 +2653,45 @@ class MainWindow(QMainWindow):
                 break
             values.append(float(numeric_text))
 
-        total_item = self.recipe_table.item(changed_item.row(), 1)
+        total_item = self.recipe_table.item(row, 1)
         if total_item is None:
             total_item = QTableWidgetItem()
             total_item.setTextAlignment(Qt.AlignCenter)
             total_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.recipe_table.setItem(changed_item.row(), 1, total_item)
+            self.recipe_table.setItem(row, 1, total_item)
 
         self.recipe_table.blockSignals(True)
-        total_item.setText("--" if invalid_value else f"{sum(values):g}")
-        style_recipe_total_item(total_item)
-        self.update_recipe_rh(changed_item.row())
-        self.recipe_table.blockSignals(False)
+        try:
+            total_item.setText("--" if invalid_value else f"{sum(values):g}")
+            style_recipe_total_item(total_item)
+            self.update_recipe_rh(row)
+        finally:
+            self.recipe_table.blockSignals(False)
+
+    def apply_recipe_rh_from_table(self, row):
+        """Use a manually entered RH target to update the humid-air MFC flow."""
+        rh = self.recipe_cell_value(row, 3)
+        if rh is None or rh < 0 or rh > 100:
+            return
+
+        mfc4_item = self.recipe_table.item(row, 7)
+        if mfc4_item is None:
+            return
+
+        target_total = self.recipe_target_total_input.value()
+        self.recipe_table.blockSignals(True)
+        try:
+            mfc4_item.setText(f"{target_total * rh / 100:g}")
+            mfc6_item = self.recipe_table.item(row, 9)
+            if mfc6_item is not None:
+                other_flows = sum(
+                    self.recipe_cell_value(row, column) or 0.0
+                    for column in range(4, 9)
+                )
+                mfc6_item.setText(f"{target_total - other_flows:g}")
+            self.update_recipe_total_from_setpoints(row)
+        finally:
+            self.recipe_table.blockSignals(False)
 
     def update_recipe_rh(self, row):
         target_total = self.recipe_target_total_input.value()
@@ -2569,13 +2751,22 @@ class MainWindow(QMainWindow):
                 self.set_recipe_item_error(row, column, "")
 
             duration = self.recipe_duration_cell_value(row)
+            rh = self.recipe_cell_value(row, 3)
             setpoints = {
                 index: self.recipe_cell_value(row, index + 3)
                 for index in range(1, 7)
             }
-            has_values = any(value not in (None, 0.0) for value in setpoints.values())
+            has_values = (
+                rh not in (None, 0.0)
+                or any(value not in (None, 0.0) for value in setpoints.values())
+            )
             if duration == 0 and not has_values:
                 continue
+
+            if rh is None or rh < 0 or rh > 100:
+                message = f"Step {row + 1} RH must be a number between 0 and 100%."
+                self.set_recipe_item_error(row, 3, message)
+                errors.append((row + 1, message))
 
             if duration is None or duration <= 0:
                 message = (
@@ -2715,13 +2906,28 @@ class MainWindow(QMainWindow):
         input_widget.setSingleStep(0.5)
         input_widget.setValue(value)
         input_widget.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        input_widget.setFixedWidth(62)
+        input_widget.setFixedWidth(56)
         input_widget.setFixedHeight(24)
         return input_widget
 
     def selected_recipe_row(self):
         selected_rows = self.recipe_table.selectionModel().selectedRows()
         return selected_rows[0].row() if selected_rows else -1
+
+    def show_recipe_row_event_tooltip(self, row, column):
+        """Show a step's event only when its number is hovered."""
+        if column != 0:
+            QToolTip.hideText()
+            return
+
+        item = self.recipe_table.item(row, column)
+        if item is None:
+            return
+
+        event = recipe_event(self.recipe_table, row) or "Not set"
+        cell_rect = self.recipe_table.visualItemRect(item)
+        position = self.recipe_table.viewport().mapToGlobal(cell_rect.bottomLeft())
+        QToolTip.showText(position, f"Event: {event}", self.recipe_table)
 
     def update_recipe_mfc6_remainder(self, *_args):
         if not hasattr(self, "recipe_mfc6_remainder_label"):
@@ -2808,6 +3014,7 @@ class MainWindow(QMainWindow):
 
     def sync_recipe_mixture_from_row(self, row):
         if row < 0:
+            self.recipe_duration_input.setText("")
             return
 
         values = {
@@ -2827,6 +3034,8 @@ class MainWindow(QMainWindow):
             input_widget.blockSignals(True)
             input_widget.setValue(value)
             input_widget.blockSignals(False)
+        duration_item = self.recipe_table.item(row, 2)
+        self.recipe_duration_input.setText(duration_item.text() if duration_item else "")
         self.update_recipe_mfc6_remainder()
 
     def on_recipe_selection_changed(self):
@@ -2840,6 +3049,7 @@ class MainWindow(QMainWindow):
         self.recipe_event_input.blockSignals(False)
         editable = row >= 0 and not self.is_experiment_running()
         self.recipe_event_input.setEnabled(editable)
+        self.recipe_duration_input.setEnabled(editable)
         for input_widget in self.recipe_mixture_inputs:
             input_widget.setEnabled(editable)
         self.recipe_apply_mixture_button.setEnabled(editable)
@@ -2855,15 +3065,29 @@ class MainWindow(QMainWindow):
             self.recipe_event_input.text(),
         )
 
+    def commit_recipe_duration(self):
+        row = self.selected_recipe_row()
+        if row < 0 or self.is_experiment_running():
+            return
+
+        item = self.recipe_table.item(row, 2)
+        if item is None:
+            return
+        item.setText(self.recipe_duration_input.text().strip())
+        self.validate_recipe_live()
+
     def on_experiment_started(self, filename):
         self.completed_experiment_exists = False
         self.current_file_path = filename
         self.experiment_status_step_index = -1
         self.experiment_step_deadline = None
+        self.experiment_status_state = "running"
+        self.experiment_last_step_index = -1
         self.start_button.setEnabled(False)
         set_recipe_editable(self.recipe_table, self.recipe_action_buttons, False)
         self.recipe_target_total_input.setEnabled(False)
         self.recipe_event_input.setEnabled(False)
+        self.recipe_duration_input.setEnabled(False)
         for input_widget in self.recipe_mixture_inputs:
             input_widget.setEnabled(False)
         self.recipe_apply_mixture_button.setEnabled(False)
@@ -2904,10 +3128,14 @@ class MainWindow(QMainWindow):
         self.cancel_all_environment_countdowns(restore=False)
         self.reset_duration_controls()
         if stopped_after_error:
+            self.experiment_status_state = "error"
             self.bottom_acquisition_label.setText("Acquisition error")
             self.update_experiment_status()
             return
 
+        self.experiment_status_state = (
+            "completed" if message.startswith("Experiment completed") else "stopped"
+        )
         self.status_label.setText("STOPPED")
         self.set_status_badge_state("stopped")
         self.file_label.setText(message)
@@ -2925,6 +3153,7 @@ class MainWindow(QMainWindow):
             return
 
         self.experiment_status_step_index = step_index
+        self.experiment_last_step_index = step_index
         if 0 <= step_index < len(self.recipe_to_run):
             duration_seconds = self.recipe_to_run[step_index]["duration_ms"] / 1000
             self.experiment_step_deadline = time.monotonic() + duration_seconds
@@ -2936,6 +3165,7 @@ class MainWindow(QMainWindow):
         self.update_experiment_status()
 
     def on_device_error(self, message):
+        self.experiment_status_state = "error"
         self.status_label.setText("ERROR")
         self.set_status_badge_state("error")
         self.bottom_acquisition_label.setText("Acquisition error")
@@ -2954,13 +3184,37 @@ class MainWindow(QMainWindow):
         self.experiment_total_time_value.setText(
             self.format_experiment_duration(total_seconds) if total_seconds else "--"
         )
+        self.experiment_sampling_rate_value.setText(
+            f"{self.rate_input.value():g} Hz"
+        )
+        elapsed_seconds = self.elapsed_duration_seconds()
+        self.experiment_elapsed_value.setText(
+            self.format_experiment_duration(elapsed_seconds)
+        )
+
+        state = self.experiment_status_state
+        state_labels = {
+            "idle": "IDLE",
+            "running": "RUNNING",
+            "completed": "COMPLETED",
+            "stopped": "STOPPED",
+            "error": "ERROR",
+        }
+        self.experiment_state_badge.setText(state_labels.get(state, "IDLE"))
+        self.experiment_state_badge.setProperty("state", state)
+        self.experiment_state_badge.style().unpolish(self.experiment_state_badge)
+        self.experiment_state_badge.style().polish(self.experiment_state_badge)
         if (
             self.is_experiment_running()
             and 0 <= self.experiment_status_step_index < len(self.recipe_to_run)
         ):
+            step = self.recipe_to_run[self.experiment_status_step_index]
             self.experiment_step_value.setText(
-                f"{self.experiment_status_step_index + 1} of {len(self.recipe_to_run)}"
+                f"Step {self.experiment_status_step_index + 1} of {len(self.recipe_to_run)}"
             )
+            event_name = str(step.get("event_name", "")).strip()
+            self.experiment_event_value.setText(event_name or "No event description")
+            self.experiment_time_caption.setText("Time remaining")
             remaining_seconds = max(
                 0,
                 math.ceil(self.experiment_step_deadline - time.monotonic())
@@ -2968,9 +3222,53 @@ class MainWindow(QMainWindow):
             self.experiment_remaining_value.setText(
                 self.format_experiment_duration(remaining_seconds)
             )
+            progress = round(100 * elapsed_seconds / total_seconds) if total_seconds else 0
+            self.experiment_progress.setValue(max(0, min(100, progress)))
+        elif state == "completed":
+            total_steps = len(self.recipe_to_run) or self.recipe_table.rowCount()
+            self.experiment_step_value.setText("Completed")
+            self.experiment_event_value.setText(
+                f"{total_steps} of {total_steps} steps"
+            )
+            self.experiment_time_caption.setText("Total duration")
+            self.experiment_remaining_value.setText(
+                self.format_experiment_duration(total_seconds)
+            )
+            self.experiment_progress.setValue(100)
+        elif state in ("stopped", "error"):
+            total_steps = len(self.recipe_to_run) or self.recipe_table.rowCount()
+            if self.experiment_last_step_index >= 0:
+                self.experiment_step_value.setText(
+                    f"Step {self.experiment_last_step_index + 1} of {total_steps}"
+                )
+            else:
+                self.experiment_step_value.setText("Not started")
+            self.experiment_event_value.setText(
+                "Stopped by user" if state == "stopped" else "Experiment stopped due to an error"
+            )
+            self.experiment_time_caption.setText("Elapsed time")
+            self.experiment_remaining_value.setText(
+                self.format_experiment_duration(elapsed_seconds)
+            )
+            progress = round(100 * elapsed_seconds / total_seconds) if total_seconds else 0
+            self.experiment_progress.setValue(max(0, min(100, progress)))
         else:
-            self.experiment_step_value.setText("--")
-            self.experiment_remaining_value.setText("--")
+            total_steps = self.recipe_table.rowCount()
+            self.experiment_step_value.setText("Not started")
+            self.experiment_event_value.setText(f"0 of {total_steps} steps")
+            self.experiment_time_caption.setText("Time remaining")
+            self.experiment_remaining_value.setText("--:--:--")
+            self.experiment_progress.setValue(0)
+
+    def elapsed_duration_seconds(self):
+        parts = self.elapsed_label.text().split(":")
+        if len(parts) != 3:
+            return 0
+        try:
+            hours, minutes, seconds = (int(part) for part in parts)
+        except ValueError:
+            return 0
+        return max(0, hours * 3600 + minutes * 60 + seconds)
 
     def experiment_schedule_total_seconds(self):
         total_seconds = 0
@@ -3022,110 +3320,6 @@ class MainWindow(QMainWindow):
     def is_experiment_running(self):
         return self.manager.acquisition_timer.isActive()
 
-    def update_manual_mfc_test_limit(self, _index=None):
-        if not hasattr(self, "manual_mfc_flow_input"):
-            return
-        channel_index = self.manual_mfc_channel_selector.currentData()
-        try:
-            capacity = self.manager.mfc_channel_capacity_sccm(int(channel_index))
-        except (TypeError, ValueError, IndexError):
-            capacity = 0.0
-        self.manual_mfc_flow_input.setRange(0.01, max(0.01, capacity))
-        self.manual_mfc_flow_input.setToolTip(
-            f"MFC {channel_index} hardware capacity: {capacity:g} mln/min"
-        )
-        if self.manual_mfc_flow_input.value() > capacity > 0:
-            self.manual_mfc_flow_input.setValue(capacity)
-
-    def update_manual_mfc_test_controls(self):
-        if not hasattr(self, "manual_mfc_test_card"):
-            return
-        ready = (
-            self.manager.mfc_mode == "real"
-            and self.is_real_mfc_mode()
-            and not self.is_experiment_running()
-        )
-        for widget in (
-            self.manual_mfc_channel_selector,
-            self.manual_mfc_flow_input,
-            self.manual_mfc_apply_button,
-            self.manual_mfc_zero_button,
-        ):
-            widget.setEnabled(ready)
-
-        if ready:
-            self.manual_mfc_test_state.setText(
-                "One channel only. All MFC setpoints must be zero before Apply."
-            )
-        elif self.is_experiment_running():
-            self.manual_mfc_test_state.setText(
-                "Manual test is disabled while an experiment is running."
-            )
-        else:
-            self.manual_mfc_test_state.setText(
-                "Connect a verified real rack to enable manual testing."
-            )
-
-    def apply_manual_mfc_test(self):
-        if not self.manual_mfc_apply_button.isEnabled():
-            return
-
-        channel_index = self.manual_mfc_channel_selector.currentData()
-        flow = self.manual_mfc_flow_input.value()
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Warning)
-        dialog.setWindowTitle("Apply real MFC test flow?")
-        dialog.setText(f"Apply {flow:g} mln/min to MFC {channel_index}?")
-        dialog.setInformativeText(
-            "This sends a real command to the verified MFC rack. Only the selected "
-            "channel may flow; the app will refuse the test unless every MFC setpoint "
-            "is currently zero. Confirm the gas outlet is open before continuing."
-        )
-        apply_button = dialog.addButton("Apply test flow", QMessageBox.AcceptRole)
-        cancel_button = dialog.addButton("Cancel", QMessageBox.RejectRole)
-        dialog.setDefaultButton(cancel_button)
-        dialog.exec()
-        if dialog.clickedButton() != apply_button:
-            return
-
-        state = self.manager.apply_manual_mfc_test(channel_index, flow)
-        if state is None:
-            return
-        self.manual_mfc_test_state.setText(
-            f"MFC {channel_index} command confirmed: {flow:g} mln/min. "
-            "Use Zero all MFCs when the check is complete."
-        )
-        self.set_system_message(
-            f"Manual MFC test active on MFC {channel_index}: {flow:g} mln/min.",
-            "running",
-        )
-
-    def confirm_zero_all_mfcs(self):
-        if not self.manual_mfc_zero_button.isEnabled():
-            return
-
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Warning)
-        dialog.setWindowTitle("Zero all real MFCs?")
-        dialog.setText("Set all six real MFC setpoints to zero?")
-        dialog.setInformativeText(
-            "The app will send zero to every verified controller and then read the "
-            "setpoints back. Do not treat a communication error as confirmation that "
-            "the gas flow has stopped."
-        )
-        zero_button = dialog.addButton("Zero all MFCs", QMessageBox.DestructiveRole)
-        cancel_button = dialog.addButton("Cancel", QMessageBox.RejectRole)
-        dialog.setDefaultButton(cancel_button)
-        dialog.exec()
-        if dialog.clickedButton() != zero_button:
-            return
-
-        state = self.manager.zero_real_mfc_setpoints()
-        if state is None:
-            return
-        self.manual_mfc_test_state.setText("All six MFC zero setpoints were confirmed.")
-        self.set_system_message("All verified MFC setpoints reset to zero.", "idle")
-
     def update_device_setup_controls_enabled(self):
         setup_enabled = not self.is_experiment_running()
         multimeter_real = self.is_real_multimeter_mode()
@@ -3144,7 +3338,7 @@ class MainWindow(QMainWindow):
         mfc_port = self.mfc_port_selector.currentData()
         mfc_ready = not mfc_real or mfc_port in self.mfc_verified_ports
         self.connect_mfc_button.setEnabled(setup_enabled and mfc_ready)
-        self.update_manual_mfc_test_controls()
+        self.zero_mfc_setpoints_button.setEnabled(setup_enabled)
 
     def on_multimeter_mode_changed(self, _text):
         is_real = self.is_real_multimeter_mode()
@@ -3407,11 +3601,10 @@ class MainWindow(QMainWindow):
         self.status_label.setText("IDLE")
         self.set_status_badge_state("idle")
         self.set_system_message(
-            "MFC rack verified. Click Connect to monitor it or run a manual single-channel test.",
+            "MFC rack verified. Click Connect to monitor it.",
             "idle",
         )
         self.update_device_setup_controls_enabled()
-        self.update_manual_mfc_test_controls()
 
     def connect_mfc(self):
         if self.is_experiment_running():
@@ -3460,7 +3653,6 @@ class MainWindow(QMainWindow):
             )
             self.mfc_status_label.setToolTip(status)
             self.set_mfc_write_controls_enabled(False)
-            self.update_manual_mfc_test_limit()
         else:
             if self.is_real_mfc_mode():
                 self.set_connection_label(
@@ -3489,7 +3681,6 @@ class MainWindow(QMainWindow):
                 )
                 self.set_mfc_write_controls_enabled(True)
             self.mfc_status_label.setToolTip(status)
-        self.update_manual_mfc_test_controls()
 
     @staticmethod
     def set_device_summary(label, dot, text, state):
@@ -3652,7 +3843,7 @@ class MainWindow(QMainWindow):
                 f"Real rack | {port} | {self.manager.settings.mfc_baudrate} | 6/6 verified"
             )
         elif verified:
-            self.mfc_rack_status_label.setText("Simulation | 6 simulated MFC channels")
+            self.mfc_rack_status_label.setText("Simulation · 6 channels")
         elif self.manager.mfc_mode == "real":
             self.mfc_rack_status_label.setText("Real rack | not connected")
         else:
@@ -3672,24 +3863,39 @@ class MainWindow(QMainWindow):
 
         for index, widgets in self.mfc_channel_monitor.items():
             channel = channels.get(index)
-            status_label = widgets["status"]
+            detail_label = widgets["detail"]
             if channel is None:
                 widgets["actual"].setText("--")
                 widgets["setpoint"].setText("--")
-                status_label.setText("Waiting")
-                status_label.setProperty("state", "waiting")
+                detail_label.setVisible(False)
                 widgets["row"].setToolTip("")
             else:
                 unit = channel.capacity_unit or "mln/min"
                 widgets["actual"].setText(f"{channel.actual_sccm:.2f}")
                 widgets["setpoint"].setText(f"{channel.setpoint_sccm:.2f}")
-                status_label.setText(channel.status)
-                status_label.setProperty(
-                    "state",
-                    "alarm" if channel.status == "ALARM"
-                    else "simulated" if channel.status == "SIMULATED"
-                    else "ok",
+                status = (channel.status or "").upper()
+                health_state = (
+                    "alarm" if status not in {"", "OK", "SIMULATED"}
+                    else "simulated" if status == "SIMULATED"
+                    else "ok"
                 )
+                if health_state == "alarm":
+                    detail_label.setText(status.title())
+                    detail_label.setProperty("state", "alarm")
+                    detail_label.setVisible(True)
+                elif channel.serial:
+                    detail_label.setText(
+                        f"{channel.serial} | limit {channel.capacity_sccm:g} {unit}"
+                    )
+                    detail_label.setProperty("state", "serial")
+                    detail_label.setVisible(True)
+                else:
+                    detail_label.setVisible(False)
+                header_item = self.recipe_table.horizontalHeaderItem(index + 3)
+                if header_item is not None:
+                    header_item.setToolTip(
+                        f"MFC {index} limit: {channel.capacity_sccm:g} {unit}"
+                    )
                 widgets["row"].setToolTip(
                     f"Address: {channel.address}\n"
                     f"Serial: {channel.serial}\n"
@@ -3698,8 +3904,8 @@ class MainWindow(QMainWindow):
                     f"Temperature: {channel.temperature_c:.2f} C\n"
                     f"Alarm Info: {channel.alarm_info or '0'}"
                 )
-            status_label.style().unpolish(status_label)
-            status_label.style().polish(status_label)
+            detail_label.style().unpolish(detail_label)
+            detail_label.style().polish(detail_label)
 
     @staticmethod
     def set_toggle_active(button, active):
@@ -3861,27 +4067,39 @@ class MainWindow(QMainWindow):
         return "OPEN" if suffix == " Ohm" else "--"
 
     def add_log_preview_row(self, data, event):
-        # The preview is capped for UI performance. The logger still writes the
-        # complete experiment history to disk.
-        if self.log_table.rowCount() >= self.max_log_preview_rows:
-            self.log_table.removeRow(0)
+        step_text = "--"
+        if self.recipe_to_run:
+            step_index = self.experiment_status_step_index
+            if not 0 <= step_index < len(self.recipe_to_run):
+                step_index = self.experiment_last_step_index
+            if 0 <= step_index < len(self.recipe_to_run):
+                step_text = f"{step_index + 1}/{len(self.recipe_to_run)}"
 
-        row = self.log_table.rowCount()
-        self.log_table.insertRow(row)
-
-        values = [
+        self.log_preview_records.append([
             data["timestamp"],
             f"{data['elapsed_s']:.1f}",
+            step_text,
             self.format_number(data["resistance_ohm"], precision=2),
-            f"{sum(data.get(f'mfc{index}_actual_sccm', 0.0) for index in range(1, 7)):.2f}",
             f"{sum(data.get(f'mfc{index}_setpoint_sccm', 0.0) for index in range(1, 7)):.2f}",
-            event,
-        ]
+            f"{sum(data.get(f'mfc{index}_actual_sccm', 0.0) for index in range(1, 7)):.2f}",
+            data.get("event") or event or "--",
+        ])
+        self.log_preview_records = self.log_preview_records[-50:]
+        self.refresh_log_preview()
 
-        for col, value in enumerate(values):
-            item = QTableWidgetItem(str(value))
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            self.log_table.setItem(row, col, item)
+    def refresh_log_preview(self):
+        if not hasattr(self, "log_table"):
+            return
+
+        records = self.log_preview_records[-self.max_log_preview_rows:]
+        self.log_table.setRowCount(0)
+        for values in records:
+            row = self.log_table.rowCount()
+            self.log_table.insertRow(row)
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.log_table.setItem(row, col, item)
 
         self.log_table.scrollToBottom()
 
@@ -3920,6 +4138,57 @@ class MainWindow(QMainWindow):
                 color: #64748b;
                 font-size: 12px;
                 font-weight: 700;
+            }
+            QLabel#toolbarFilePath {
+                color: #64748b;
+                font-size: 12px;
+                font-weight: 600;
+                padding-left: 0;
+            }
+            QFrame#fileLocationControl {
+                background: #ffffff;
+                border: 1px solid #dce5ef;
+                border-radius: 6px;
+            }
+            QLabel#fileLocationIcon {
+                background: transparent;
+                border: none;
+            }
+            QLineEdit#saveLocationInput {
+                border: none;
+                border-radius: 0;
+                background: transparent;
+                padding: 0;
+                min-height: 0;
+            }
+            QLineEdit#saveLocationInput:focus {
+                border: none;
+                background: transparent;
+            }
+            QPushButton#fileLocationBrowseButton {
+                min-height: 30px;
+                max-height: 30px;
+                min-width: 38px;
+                max-width: 38px;
+                padding: 0;
+                background: #ffffff;
+                border: none;
+                border-left: 1px solid #e5eaf0;
+                border-radius: 0;
+                border-top-right-radius: 5px;
+                border-bottom-right-radius: 5px;
+            }
+            QPushButton#fileLocationBrowseButton:hover {
+                background: #f8fafc;
+            }
+            QFrame#formatControl {
+                background: #ffffff;
+                border: 1px solid #dce5ef;
+                border-radius: 6px;
+            }
+            QLabel#formatControlIcon {
+                background: transparent;
+                border: none;
             }
             QFrame#toolbarDivider {
                 background: #e5eaf0;
@@ -4045,6 +4314,11 @@ class MainWindow(QMainWindow):
                 border: 1px solid #dce5ef;
                 border-radius: 5px;
             }
+            QFrame#experimentStatusCard {
+                background: #ffffff;
+                border: 1px solid #dce5ef;
+                border-radius: 5px;
+            }
             QFrame#graphCard {
                 background: #ffffff;
                 border: 1px solid #dce5ef;
@@ -4132,6 +4406,20 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-bottom: 1px solid #edf2f7;
             }
+            QPushButton#mfcZeroButton {
+                min-height: 28px;
+                color: #b91c1c;
+                background: #ffffff;
+                border: 1px solid #fecaca;
+                border-radius: 3px;
+                padding: 0 8px;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QPushButton#mfcZeroButton:hover {
+                background: #fff1f2;
+                border-color: #fca5a5;
+            }
             QFrame#deviceSetupPanel {
                 background: transparent;
                 border: none;
@@ -4144,21 +4432,15 @@ class MainWindow(QMainWindow):
             QFrame#compactStateRow {
                 background: transparent;
                 border: none;
-                border-bottom: 1px solid #edf2f7;
-                min-height: 36px;
-                max-height: 40px;
+                border-bottom: 1px solid #f1f5f9;
+                min-height: 44px;
+                max-height: 44px;
             }
             QLabel#compactDot {
                 min-width: 6px;
                 max-width: 6px;
                 min-height: 6px;
                 max-height: 6px;
-            }
-            QFrame#compactReadingMarker {
-                min-width: 12px;
-                max-width: 12px;
-                min-height: 4px;
-                max-height: 4px;
             }
             QLabel {
                 color: #233244;
@@ -4175,6 +4457,11 @@ class MainWindow(QMainWindow):
                 color: #52637a;
                 font-size: 12px;
                 font-weight: 700;
+            }
+            QLabel#compactReadingDescription {
+                color: #94a3b8;
+                font-size: 10px;
+                font-weight: 500;
             }
             QLabel#toolbarSectionLabel {
                 color: #334155;
@@ -4246,10 +4533,36 @@ class MainWindow(QMainWindow):
                 color: #15803d;
                 background: #dcfce7;
             }
+            QLabel#experimentStateBadge[state="completed"] {
+                color: #15803d;
+                background: #dcfce7;
+            }
             QLabel#experimentStateBadge[state="stopped"],
             QLabel#experimentStateBadge[state="error"] {
                 color: #dc2626;
                 background: #fee2e2;
+            }
+            QLabel#experimentStatusCaption {
+                color: #64748b;
+                font-size: 11px;
+                font-weight: 700;
+                margin-top: 2px;
+            }
+            QLabel#experimentEventValue {
+                color: #52637a;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QProgressBar#experimentProgress {
+                background: #e8edf3;
+                border: none;
+                border-radius: 5px;
+                min-height: 10px;
+                max-height: 10px;
+            }
+            QProgressBar#experimentProgress::chunk {
+                background: #35a06f;
+                border-radius: 5px;
             }
             QLabel#metricValue[metricColor="blue"] {
                 color: #2563eb;
@@ -4271,6 +4584,26 @@ class MainWindow(QMainWindow):
                 color: #0f172a;
                 font-size: 14px;
                 font-weight: 600;
+            }
+            QLabel#metricValue[readingColor="blue"] {
+                color: #2563eb;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QLabel#metricValue[readingColor="slate"] {
+                color: #64748b;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QLabel#metricValue[readingColor="teal"] {
+                color: #0f9f9a;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QLabel#metricValue[readingColor="purple"] {
+                color: #7c3aed;
+                font-size: 14px;
+                font-weight: 700;
             }
             QLabel#statusBadge {
                 background: #dcfce7;
@@ -4364,6 +4697,14 @@ class MainWindow(QMainWindow):
             }
             QLabel#mfcChannelStatus[state="simulated"] {
                 color: #64748b;
+            }
+            QLabel#mfcChannelSerial {
+                color: #94a3b8;
+                font-size: 9px;
+                font-weight: 600;
+            }
+            QLabel#mfcChannelSerial[state="alarm"] {
+                color: #dc2626;
             }
             QLabel#deviceStatusDot {
                 background: #16a34a;
@@ -4518,16 +4859,25 @@ class MainWindow(QMainWindow):
             QPushButton#startButton,
             QPushButton#primaryButton {
                 color: #15803d;
-                border: none;
-                background: #ecfdf3;
-                font-weight: 700;
+                border: 1px solid #bbf7d0;
+                border-radius: 5px;
+                background: transparent;
+                padding: 0 6px;
+                font-size: 11px;
+                font-weight: 600;
             }
             QPushButton#startButton:hover,
             QPushButton#primaryButton:hover {
                 background: #dcfce7;
+                border-color: #86efac;
+            }
+            QPushButton#startButton {
+                font-size: 13px;
+                font-weight: 700;
             }
             QPushButton#startButton:disabled {
                 color: #94a3b8;
+                border-color: #dbe3ee;
                 background: #f1f5f9;
             }
             QPushButton#secondaryButton {
@@ -4581,9 +4931,46 @@ class MainWindow(QMainWindow):
             }
             QComboBox#toolbarFormatSelector {
                 min-height: 0;
-                max-height: 32px;
+                max-height: 30px;
+                border: none;
+                border-radius: 0;
+                background: transparent;
+                color: #172033;
                 padding-top: 0;
                 padding-bottom: 0;
+            }
+            QComboBox#toolbarFormatSelector:on {
+                background: #ffffff;
+                color: #172033;
+            }
+            QComboBox#toolbarFormatSelector::drop-down {
+                border: none;
+                width: 22px;
+            }
+            QComboBox#toolbarFormatSelector::drop-down:hover {
+                background: #f8fafc;
+                border: none;
+            }
+            QListView#toolbarFormatPopup {
+                background: #ffffff;
+                color: #172033;
+                border: 1px solid #cbd5e1;
+                border-radius: 5px;
+                outline: none;
+                padding: 2px;
+                selection-background-color: #dbeafe;
+                selection-color: #0f172a;
+            }
+            QListView#toolbarFormatPopup::item {
+                min-height: 24px;
+                padding: 3px 8px;
+                background: #ffffff;
+                color: #172033;
+            }
+            QListView#toolbarFormatPopup::item:hover,
+            QListView#toolbarFormatPopup::item:selected {
+                background: #dbeafe;
+                color: #0f172a;
             }
             QPushButton#rateStepButton {
                 min-height: 0;
@@ -4610,12 +4997,20 @@ class MainWindow(QMainWindow):
             }
             QPushButton#stopButton {
                 color: #dc2626;
-                border: none;
-                background: #fef2f2;
-                font-weight: 700;
+                border: 1px solid #fecaca;
+                border-radius: 5px;
+                background: transparent;
+                padding: 0 6px;
+                font-size: 11px;
+                font-weight: 600;
             }
             QPushButton#stopButton:hover {
                 background: #fee2e2;
+                border-color: #fca5a5;
+            }
+            QPushButton#stopButton {
+                font-size: 13px;
+                font-weight: 700;
             }
             QPushButton#recipeDuplicateButton {
                 color: #334155;
@@ -4684,10 +5079,27 @@ class MainWindow(QMainWindow):
                 font-size: 11px;
                 font-weight: 700;
             }
+            QFrame#recipeMixtureBand {
+                background: transparent;
+                border: none;
+                border-radius: 0;
+            }
+            QFrame#recipeMixtureDivider {
+                background: #d6e2ef;
+                border: none;
+            }
             QLabel#recipeMixtureValue {
-                color: #334155;
+                color: #0f172a;
                 font-size: 11px;
                 font-weight: 700;
+            }
+            QLabel#recipeMixtureFormula {
+                color: #475569;
+                background: #eef5fb;
+                border-left: 3px solid #60a5fa;
+                border-radius: 0;
+                padding: 5px 7px;
+                font-size: 10px;
             }
             QLabel#recipeDetailsTitle {
                 color: #1e293b;
@@ -4702,13 +5114,19 @@ class MainWindow(QMainWindow):
                 min-height: 0;
                 max-height: 24px;
                 padding: 0 4px;
-                border-radius: 4px;
+                border-radius: 3px;
+            }
+            QLineEdit#recipeDurationInput {
+                min-height: 24px;
+                max-height: 24px;
+                padding: 0 4px;
+                border-radius: 3px;
             }
             QPushButton#recipeMixtureButton {
                 color: #1d4ed8;
-                background: transparent;
+                background: #ffffff;
                 border: 1px solid #bfdbfe;
-                border-radius: 4px;
+                border-radius: 3px;
                 padding: 0 8px;
                 font-size: 11px;
                 font-weight: 600;
@@ -4739,49 +5157,6 @@ class MainWindow(QMainWindow):
                 font-size: 11px;
                 font-weight: 700;
             }
-            QLabel#manualMfcLabel,
-            QLabel#manualMfcUnit {
-                color: #475569;
-                font-size: 11px;
-                font-weight: 700;
-            }
-            QLabel#manualMfcHint {
-                color: #64748b;
-                font-size: 10px;
-                line-height: 1.25;
-            }
-            QComboBox#manualMfcChannel,
-            QDoubleSpinBox#manualMfcFlow {
-                min-height: 0;
-                max-height: 26px;
-                padding: 0 6px;
-            }
-            QPushButton#manualMfcApplyButton {
-                color: #1d4ed8;
-                background: transparent;
-                border: 1px solid #bfdbfe;
-                border-radius: 4px;
-                padding: 0 6px;
-                font-size: 10px;
-                font-weight: 700;
-            }
-            QPushButton#manualMfcApplyButton:hover {
-                background: #dbeafe;
-                border-color: #93c5fd;
-            }
-            QPushButton#manualMfcZeroButton {
-                color: #b91c1c;
-                background: transparent;
-                border: 1px solid #fecaca;
-                border-radius: 4px;
-                padding: 0 6px;
-                font-size: 10px;
-                font-weight: 700;
-            }
-            QPushButton#manualMfcZeroButton:hover {
-                background: #fee2e2;
-                border-color: #fca5a5;
-            }
             QPushButton:disabled {
                 color: #9ca3af;
                 background: #eef2f7;
@@ -4804,24 +5179,24 @@ class MainWindow(QMainWindow):
             }
             QTableWidget#recipeTable {
                 background: #ffffff;
-                alternate-background-color: #f6f8fb;
-                border: 1px solid #d9e2ee;
+                alternate-background-color: #fbfcfe;
+                border: 1px solid #e4ebf3;
                 border-radius: 0;
-                gridline-color: #d9e2ee;
+                gridline-color: #e7edf4;
             }
             QTableWidget#recipeTable QHeaderView::section {
-                background: #e8eef5;
-                color: #1f3653;
+                background: #ffffff;
+                color: #334155;
                 border: 0;
-                border-right: 1px solid #d4deea;
-                border-bottom: 1px solid #d4deea;
+                border-right: 1px solid #edf1f5;
+                border-bottom: 1px solid #dfe7f0;
                 padding: 5px 4px;
                 font-weight: 700;
                 font-size: 11px;
             }
             QTableWidget#recipeTable::item:selected,
             QTableWidget#recipeTable::item:selected:!active {
-                background: #dbeafe;
+                background: #fff8e7;
                 color: #0f172a;
                 border: 0;
                 outline: none;
@@ -4830,19 +5205,18 @@ class MainWindow(QMainWindow):
                 min-height: 0;
                 max-height: 20px;
                 padding: 0 3px;
-                border: 1px solid #93c5fd;
-                border-radius: 3px;
+                border: 1px solid #d1dbe7;
+                border-radius: 0;
                 background: #ffffff;
             }
             QTableWidget#recipeTable QLineEdit:focus {
                 border: 1px solid #2563eb;
-                border-radius: 3px;
+                border-radius: 0;
                 background: #ffffff;
             }
             QFrame#recipeMixtureBand {
                 background: #f8fafc;
                 border: 0;
-                border-top: 1px solid #dbe3ee;
                 border-radius: 0;
             }
             QHeaderView::section {
@@ -4854,5 +5228,17 @@ class MainWindow(QMainWindow):
                 padding: 5px 4px;
                 font-weight: 700;
                 font-size: 11px;
+            }
+            QTableWidget#logPreviewTable {
+                border: 1px solid #dbe3ee;
+                border-radius: 0;
+                gridline-color: #e2e8f0;
+                background: #ffffff;
+            }
+            QTableWidget#logPreviewTable::item {
+                border: none;
+                border-right: 1px solid #e2e8f0;
+                border-bottom: 1px solid #e2e8f0;
+                padding: 2px 5px;
             }
         """.replace("__CHEVRON_DOWN__", chevron_down_path))
