@@ -15,19 +15,10 @@ class MultimeterDevice(Protocol):
 
 
 class MFCDevice(Protocol):
-    def set_nh3_flow(self, value_sccm):
+    def set_channel_setpoints(self, setpoints):
         ...
 
-    def set_air_flow(self, value_sccm):
-        ...
-
-    def air_purge(self):
-        ...
-
-    def set_humidity(self, enabled):
-        ...
-
-    def set_heating(self, enabled):
+    def safe_shutdown(self):
         ...
 
     def get_state(self) -> ControlState:
@@ -35,4 +26,3 @@ class MFCDevice(Protocol):
 
     def close(self):
         ...
-

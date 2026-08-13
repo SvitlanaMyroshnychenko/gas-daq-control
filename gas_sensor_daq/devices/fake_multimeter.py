@@ -7,7 +7,6 @@ from gas_sensor_daq.models.records import MeasurementRecord
 
 class FakeMultimeter:
     def __init__(self):
-        self.temperature_c = 25.0
         self.reset_time()
 
     def reset_time(self):
@@ -15,16 +14,16 @@ class FakeMultimeter:
 
     def read(self, control_state):
         elapsed = time.time() - self.start_time
-        sensor_state = control_state.to_sensor_state()
+        channels = {channel.index: channel for channel in control_state.mfc_channels}
 
+        # The fake response is intentionally simple but follows the six-MFC
+        # setup: analyte MFCs and the humid-air channel lower resistance.
         baseline = 10000
-
-        gas_effect = 0
-        if sensor_state["nh3_flow"] > 0:
-            gas_effect = -1500 * min(sensor_state["nh3_flow"] / 20, 1)
-
-        humidity_effect = -300 if sensor_state["humidity_on"] else 0
-        heating_effect = 300 if sensor_state["heating_on"] else 0
+        analyte_flow = sum(channels.get(index).actual_sccm for index in range(1, 4) if index in channels)
+        humid_air_flow = channels.get(4).actual_sccm if 4 in channels else 0.0
+        total_flow = sum(channel.actual_sccm for channel in channels.values())
+        gas_effect = -1500 * min(analyte_flow / 20, 1)
+        humidity_effect = -300 * min(humid_air_flow / max(total_flow, 1.0), 1)
 
         drift = 50 * math.sin(elapsed / 30)
         noise = random.uniform(-30, 30)
@@ -33,29 +32,16 @@ class FakeMultimeter:
             baseline
             + gas_effect
             + humidity_effect
-            + heating_effect
             + drift
             + noise
         )
-
-        target_temperature = 40 if sensor_state["heating_on"] else 25
-        self.temperature_c += (target_temperature - self.temperature_c) * 0.18
-        temperature = self.temperature_c + random.uniform(-0.25, 0.25)
 
         return MeasurementRecord(
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             elapsed_s=elapsed,
             resistance_ohm=resistance,
-            temperature_c=temperature,
-            nh3_flow_sccm=control_state.nh3_flow_sccm,
-            air_flow_sccm=control_state.air_flow_sccm,
-            humidity_on=control_state.humidity_on,
-            heating_on=control_state.heating_on,
-            nh3_setpoint_sccm=control_state.nh3_setpoint_sccm,
-            nh3_actual_sccm=control_state.nh3_actual_sccm,
-            air_setpoint_sccm=control_state.air_setpoint_sccm,
-            air_actual_sccm=control_state.air_actual_sccm,
-            device_status=control_state.device_status,
+            multimeter_status="SIMULATED OK",
+            mfc_channels=control_state.mfc_channels,
         )
 
     def close(self):

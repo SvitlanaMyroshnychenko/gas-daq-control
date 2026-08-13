@@ -1,74 +1,87 @@
 from dataclasses import asdict, dataclass
 
 
+MFC_CHANNEL_COUNT = 6
+
+
+def mfc_channel_fieldnames():
+    fields = []
+    for index in range(1, MFC_CHANNEL_COUNT + 1):
+        prefix = f"mfc{index}_"
+        fields.extend([
+            f"{prefix}setpoint_mln_min",
+            f"{prefix}actual_mln_min",
+        ])
+    return fields
+
+
 FIELDNAMES = [
+    # This is the compact, per-sample logging contract. Static MFC identity and
+    # capacity details live once in the adjacent metadata JSON file.
     "timestamp",
     "elapsed_s",
-    "resistance_ohm",
-    "temperature_c",
-    "nh3_flow_sccm",
-    "air_flow_sccm",
-    "humidity_on",
-    "heating_on",
+    "step_number",
     "event",
-    "nh3_setpoint_sccm",
-    "nh3_actual_sccm",
-    "air_setpoint_sccm",
-    "air_actual_sccm",
-    "device_status",
+    "resistance_ohm",
+    "total_setpoint_mln_min",
+    "total_actual_mln_min",
+    "measurement_status",
+    *mfc_channel_fieldnames(),
 ]
+
+
+@dataclass(frozen=True)
+class MFCChannelState:
+    """Read-only snapshot of one MFC on the shared Bronkhorst bus."""
+
+    index: int
+    address: int
+    serial: str = ""
+    fluid_name: str = ""
+    capacity_sccm: float = 0.0
+    capacity_unit: str = ""
+    setpoint_sccm: float = 0.0
+    actual_sccm: float = 0.0
+    temperature_c: float = 0.0
+    alarm_info: str = ""
+    status: str = ""
+
+def mfc_channel_export_fields(channels):
+    fields = {field: "" for field in mfc_channel_fieldnames()}
+    for channel in channels:
+        if 1 <= channel.index <= MFC_CHANNEL_COUNT:
+            prefix = f"mfc{channel.index}_"
+            fields[f"{prefix}setpoint_mln_min"] = channel.setpoint_sccm
+            fields[f"{prefix}actual_mln_min"] = channel.actual_sccm
+    return fields
 
 
 @dataclass
 class ControlState:
-    nh3_setpoint_sccm: float = 0.0
-    nh3_actual_sccm: float = 0.0
-    air_setpoint_sccm: float = 100.0
-    air_actual_sccm: float = 100.0
-    humidity_on: bool = False
-    heating_on: bool = False
+    """Current state of the shared six-channel MFC rack."""
+
     device_status: str = "Simulated"
-
-    @property
-    def nh3_flow_sccm(self):
-        return self.nh3_actual_sccm
-
-    @property
-    def air_flow_sccm(self):
-        return self.air_actual_sccm
-
-    def to_sensor_state(self):
-        return {
-            "nh3_flow": self.nh3_actual_sccm,
-            "air_flow": self.air_actual_sccm,
-            "humidity_on": self.humidity_on,
-            "heating_on": self.heating_on,
-        }
-
-    def to_dict(self):
-        return asdict(self) | {
-            "nh3_flow_sccm": self.nh3_flow_sccm,
-            "air_flow_sccm": self.air_flow_sccm,
-        }
+    mfc_port: str = ""
+    mfc_channels: tuple[MFCChannelState, ...] = ()
 
 
 @dataclass
 class MeasurementRecord:
+    """One row of experiment data written to CSV/Excel and shown in preview."""
+
     timestamp: str
     elapsed_s: float
     resistance_ohm: float
-    temperature_c: float
-    nh3_flow_sccm: float
-    air_flow_sccm: float
-    humidity_on: bool
-    heating_on: bool
     event: str = ""
-    nh3_setpoint_sccm: float = 0.0
-    nh3_actual_sccm: float = 0.0
-    air_setpoint_sccm: float = 100.0
-    air_actual_sccm: float = 100.0
-    device_status: str = "Simulated"
+    multimeter_status: str = "Simulated"
+    mfc_channels: tuple[MFCChannelState, ...] = ()
+    step_number: int | None = None
+    total_setpoint_mln_min: float = 0.0
+    total_actual_mln_min: float = 0.0
 
     def to_dict(self):
-        return asdict(self)
-
+        data = asdict(self)
+        data.pop("mfc_channels", None)
+        return data | mfc_channel_export_fields(self.mfc_channels) | {
+            "measurement_status": self.multimeter_status,
+        }
