@@ -2452,7 +2452,7 @@ class MainWindow(QMainWindow):
                 f"Real rack | {port} | {self.manager.settings.mfc_baudrate} | 6/6 verified"
             )
         elif verified:
-            self.mfc_rack_status_label.setText("Simulation Â· 6 channels")
+            self.mfc_rack_status_label.setText("Simulation | 6 channels")
         elif self.manager.mfc_mode == "real":
             self.mfc_rack_status_label.setText("Real rack | not connected")
         else:
