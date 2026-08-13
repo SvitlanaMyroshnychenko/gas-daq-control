@@ -14,6 +14,16 @@ Desktop application for gas-sensor experiments with a Keithley resistance multim
 
 The interface and all flow values use `mln/min`, the normalized-flow unit reported by the verified MFC rack.
 
+## Interface Preview
+
+The application combines live resistance and MFC-flow plots, the six-channel monitor, the editable experiment schedule, and current experiment status in one workspace.
+
+![Gas Sensor DAQ overview](docs/images/application-overview.png)
+
+The schedule below the plot records the planned setpoints, humidity, duration, and event for every experiment step. The example is shown in simulated-device mode after a completed run.
+
+![Completed scheduled experiment](docs/images/experiment-completed.png)
+
 ## Quick Start
 
 1. Create and activate/install the Python environment:
