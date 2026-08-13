@@ -3,11 +3,16 @@ import unittest
 from PySide6.QtCore import QCoreApplication
 
 from gas_sensor_daq.core.acquisition_manager import AcquisitionManager
+from gas_sensor_daq.settings import DeviceSettings
 
 
 class ClosingLogger:
     def __init__(self):
         self.close_calls = 0
+        self.metadata_updates = []
+
+    def update_metadata(self, updates):
+        self.metadata_updates.append(dict(updates))
 
     def close(self):
         self.close_calls += 1
@@ -85,6 +90,16 @@ class AcquisitionManagerShutdownTests(unittest.TestCase):
 
         self.assertIn("CRITICAL", self.messages[-1])
         self.assertIn("could not be confirmed", self.messages[-1])
+
+    def test_start_requires_a_selected_save_location(self):
+        manager = AcquisitionManager(settings=DeviceSettings(data_directory=""))
+        self.addCleanup(manager.close)
+
+        with self.assertRaisesRegex(ValueError, "Choose a save location"):
+            manager.start_experiment("CSV", data_directory="")
+
+        self.assertIsNone(manager.logger)
+        self.assertFalse(manager.acquisition_timer.isActive())
 
 
 if __name__ == "__main__":

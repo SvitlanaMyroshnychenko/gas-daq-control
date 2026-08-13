@@ -26,20 +26,16 @@ def create_multimeter(settings: DeviceSettings, mode=None, resource_name=None):
     raise ValueError(f"Unsupported multimeter mode: {settings.multimeter_mode}")
 
 
-def create_mfc(settings: DeviceSettings, mode=None, port=None, address=None):
+def create_mfc(settings: DeviceSettings, mode=None, port=None):
     # Keep MFC creation symmetric with the multimeter factory: UI/core code
     # should not need to know whether the backend is fake or propar-based.
     mode = (mode or settings.mfc_mode).lower().strip()
 
     if mode == "simulation":
-        return FakeMFC(
-            default_air_flow_sccm=settings.default_air_flow_sccm,
-            nodes=settings.mfc_nodes,
-        )
+        return FakeMFC(nodes=settings.mfc_nodes)
 
     if mode == "real":
-        # The rack is one shared propar bus. `address` remains accepted only
-        # for backwards-compatible callers; real operation always verifies all
+        # The rack is one shared propar bus. Real operation always verifies all
         # configured node addresses and serial numbers.
         return ProparMFCRack(
             port or settings.mfc_port,

@@ -110,21 +110,9 @@ class ProparMFCRack:
 
     def get_state(self):
         channels = self.read_channels()
-        primary = channels[0]
         return ControlState(
-            # Legacy fields keep the existing UI functional until its six-MFC
-            # monitor replaces the old NH3/Air controls in the next stage.
-            air_setpoint_sccm=primary.setpoint_sccm,
-            air_actual_sccm=primary.actual_sccm,
             device_status=self.status_text(),
             mfc_port=self.port,
-            mfc_address=",".join(str(channel.address) for channel in channels),
-            mfc_serial=primary.serial,
-            mfc_fluid=primary.fluid_name,
-            mfc_capacity_sccm=primary.capacity_sccm,
-            mfc_capacity_unit=primary.capacity_unit,
-            mfc_temperature_c=primary.temperature_c,
-            mfc_alarm_info=primary.alarm_info,
             mfc_channels=channels,
         )
 
@@ -153,43 +141,6 @@ class ProparMFCRack:
                 status="ALARM" if alarm_text else "OK",
             ))
         return tuple(channels)
-
-    def set_nh3_flow(self, value_sccm):
-        raise ConnectionError("MFC rack is connected read-only; setpoint writes are disabled.")
-
-    def set_air_flow(self, value_sccm):
-        raise ConnectionError("MFC rack is connected read-only; setpoint writes are disabled.")
-
-    def air_purge(self):
-        raise ConnectionError("MFC rack is connected read-only; purge writes are disabled.")
-
-    def set_humidity(self, enabled):
-        raise ConnectionError("Humidity controller is not connected to the MFC rack.")
-
-    def set_heating(self, enabled):
-        raise ConnectionError("Heating controller is not connected to the MFC rack.")
-
-    def apply_manual_test_setpoint(self, channel_index, value_sccm):
-        """Set one verified channel after a conservative read-only preflight."""
-        self._ensure_connected()
-        channel_index = int(channel_index)
-        if channel_index not in self.channel_capacities:
-            raise ValueError("Choose an MFC channel from 1 to 6.")
-
-        value_sccm = float(value_sccm)
-        capacity = self.channel_capacities[channel_index]
-        if not math.isfinite(value_sccm) or value_sccm <= 0:
-            raise ValueError("Manual test flow must be greater than zero.")
-        if value_sccm > capacity:
-            raise ValueError(
-                f"MFC {channel_index} test flow exceeds its {capacity:g} mln/min capacity."
-            )
-
-        channels = self.validate_recipe_start_ready()
-        selected = channels[channel_index - 1]
-        self._write_raw_setpoint(selected.address, value_sccm, capacity)
-        self._confirm_raw_setpoint(selected.address, value_sccm, capacity)
-        return self.get_state()
 
     def validate_recipe_start_ready(self):
         """Read-only preflight before a real schedule may issue its first step."""

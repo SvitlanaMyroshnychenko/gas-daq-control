@@ -170,16 +170,11 @@ class ProparMFCRackTests(unittest.TestCase):
             timestamp="2026-07-14 12:00:00",
             elapsed_s=0.0,
             resistance_ohm=10000.0,
-            nh3_flow_sccm=0.0,
-            air_flow_sccm=0.0,
-            humidity_on=False,
-            heating_on=False,
             mfc_channels=state.mfc_channels,
         )
         row = record.to_dict()
-        self.assertEqual(row["mfc1_actual_sccm"], 1.0)
-        self.assertEqual(row["mfc6_setpoint_sccm"], 6.5)
-        self.assertEqual(row["mfc6_serial"], "M25217902D")
+        self.assertEqual(row["mfc1_actual_mln_min"], 1.0)
+        self.assertEqual(row["mfc6_setpoint_mln_min"], 6.5)
 
     def test_rejects_a_rack_with_a_wrong_serial_number(self):
         nodes = [
@@ -222,31 +217,6 @@ class ProparMFCRackTests(unittest.TestCase):
         self.assertEqual(discoveries[0].port, "COM4")
         self.assertTrue(discoveries[0].verified)
         self.assertEqual(discoveries[0].addresses, (1, 2, 3, 4, 5, 6))
-
-    def test_manual_test_writes_one_channel_after_zero_preflight(self):
-        master = FakeProparMaster()
-        master.raw_setpoints = {node.address: 0 for node in EXPECTED_MFC_NODES}
-        master.use_written_setpoints = True
-        with patch.object(ProparMFCRack, "_open_master", return_value=master):
-            rack = ProparMFCRack("COM4", 38400, EXPECTED_MFC_NODES)
-            state = rack.apply_manual_test_setpoint(1, 1.5)
-            rack.close()
-
-        self.assertEqual(len(master.write_requests), 1)
-        self.assertEqual(master.write_requests[0]["node"], 1)
-        self.assertEqual(master.write_requests[0]["data"], 4800)
-        self.assertAlmostEqual(state.mfc_channels[0].setpoint_sccm, 1.5, places=2)
-
-    def test_manual_test_rejects_nonzero_existing_setpoint(self):
-        master = FakeProparMaster()
-        master.raw_setpoints = {node.address: 0 for node in EXPECTED_MFC_NODES}
-        master.use_written_setpoints = True
-        master.raw_setpoints[2] = 3200
-        with patch.object(ProparMFCRack, "_open_master", return_value=master):
-            rack = ProparMFCRack("COM4", 38400, EXPECTED_MFC_NODES)
-            with self.assertRaisesRegex(RuntimeError, "must be zero"):
-                rack.apply_manual_test_setpoint(1, 1.0)
-            rack.close()
 
     def test_zero_all_setpoints_writes_and_confirms_every_channel(self):
         master = FakeProparMaster()

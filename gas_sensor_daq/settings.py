@@ -28,10 +28,8 @@ class DeviceSettings:
     acquisition_interval_ms: int = 2000
     mfc_port: str = "COM3"
     mfc_baudrate: int = 38400
-    mfc_address: int | None = None
     mfc_nodes: tuple[MFCNodeConfig, ...] = EXPECTED_MFC_NODES
     multimeter_resource: str = ""
-    default_air_flow_sccm: float = 100.0
     # The user selects an output location in the UI before each experiment.
     data_directory: str = ""
 
@@ -56,14 +54,10 @@ def load_device_settings():
             "GAS_DAQ_MFC_BAUDRATE",
             _env_int("GAS_DAQ_BRONKHORST_BAUDRATE", 38400),
         ),
-        mfc_address=_env_optional_int("GAS_DAQ_MFC_ADDRESS")
-        if os.getenv("GAS_DAQ_MFC_ADDRESS") is not None
-        else _env_optional_int("GAS_DAQ_BRONKHORST_ADDRESS"),
         multimeter_resource=os.getenv(
             "GAS_DAQ_MULTIMETER_RESOURCE",
             os.getenv("GAS_DAQ_KEITHLEY_RESOURCE", ""),
         ),
-        default_air_flow_sccm=_env_float("GAS_DAQ_DEFAULT_AIR_FLOW", 100.0),
         data_directory=os.getenv("GAS_DAQ_DATA_DIR", "").strip(),
     )
 
@@ -77,28 +71,6 @@ def _env_int(name, default):
         return int(value)
     except ValueError:
         return default
-
-
-def _env_float(name, default):
-    value = os.getenv(name)
-    if value is None:
-        return default
-
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-def _env_optional_int(name):
-    value = os.getenv(name)
-    if value is None or value.strip() == "":
-        return None
-
-    try:
-        return int(value)
-    except ValueError:
-        return None
 
 
 DEFAULT_SETTINGS = load_device_settings()

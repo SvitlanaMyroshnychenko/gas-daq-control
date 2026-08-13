@@ -56,6 +56,7 @@ def section_card(title, icon, content_layout, expanding=False, header_widget=Non
     content_frame.setLayout(content_layout)
     layout.addWidget(content_frame, 1)
     card.setLayout(layout)
+    card.content_frame = content_frame
     return card
 
 

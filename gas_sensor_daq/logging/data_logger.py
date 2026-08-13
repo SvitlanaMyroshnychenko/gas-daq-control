@@ -7,16 +7,11 @@ from openpyxl import Workbook
 from gas_sensor_daq.models.records import FIELDNAMES
 
 
-BOOLEAN_FIELDS = {"humidity_on", "heating_on"}
-
-
 def row_for_file(record):
     row = record.to_dict()
     normalized = {}
     for field in FIELDNAMES:
         value = row.get(field, "")
-        if field in BOOLEAN_FIELDS:
-            value = "true" if bool(value) else "false"
         normalized[field] = value
     return normalized
 

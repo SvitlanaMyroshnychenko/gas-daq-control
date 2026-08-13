@@ -47,18 +47,12 @@ class AcquisitionManager(QObject):
         self.mfc_mode = settings.mfc_mode
         self.multimeter_resource = settings.multimeter_resource
         self.mfc_port = settings.mfc_port
-        self.mfc_address = settings.mfc_address
         self.data_directory = settings.data_directory
         self.acquisition_interval_ms = settings.acquisition_interval_ms
         self.logger = None
         self.pending_events = []
         self.active_event = ""
         self.experiment_start_time = None
-        self.control_timer_tokens = {
-            "analyte": 0,
-            "humidity": 0,
-            "heating": 0,
-        }
 
         self.acquisition_timer = QTimer(self)
         self.acquisition_timer.timeout.connect(self.acquire_once)
@@ -128,7 +122,7 @@ class AcquisitionManager(QObject):
 
         return "Multimeter: simulated"
 
-    def set_mfc_mode(self, mode, port="", address=None):
+    def set_mfc_mode(self, mode, port=""):
         # If a real MFC connection fails, fall back to simulation. This keeps
         # the UI usable without leaving a half-connected hardware object alive.
         if self.acquisition_timer.isActive():
@@ -147,7 +141,6 @@ class AcquisitionManager(QObject):
                 self.settings,
                 mode=mode,
                 port=port or self.settings.mfc_port,
-                address=address,
             )
         except Exception as exc:
             self.mfc = create_mfc(self.settings, mode="simulation")
@@ -158,8 +151,7 @@ class AcquisitionManager(QObject):
 
         self.mfc = new_mfc
         self.mfc_mode = mode
-        self.mfc_port = port
-        self.mfc_address = address
+        self.mfc_port = port or self.settings.mfc_port
         self.mfc_changed.emit(mode, self.mfc_status_text())
         self.emit_state_changed()
         return True
@@ -285,33 +277,14 @@ class AcquisitionManager(QObject):
                 raise ValueError(
                     f"Step {step_index} total must equal the {target_total:g} mln/min target flow."
                 )
+            duration_ms = step.get("duration_ms", 0)
+            if not isinstance(duration_ms, (int, float)) or duration_ms <= 0:
+                raise ValueError(f"Step {step_index} duration must be greater than zero.")
 
     def mfc_channel_capacity_sccm(self, channel_index):
         capacities = getattr(self.mfc, "channel_capacities", {})
         fallback = self.settings.mfc_nodes[channel_index - 1].capacity_mln_min
         return float(capacities.get(channel_index, fallback))
-
-    def apply_manual_mfc_test(self, channel_index, value_sccm):
-        """Apply one explicit, operator-confirmed real-MFC test setpoint."""
-        if self.acquisition_timer.isActive():
-            self.handle_device_error(
-                "Manual MFC test blocked",
-                RuntimeError("Stop the experiment before applying a manual MFC test."),
-            )
-            return None
-        if self.mfc_mode != "real" or not isinstance(self.mfc, ProparMFCRack):
-            self.handle_device_error(
-                "Manual MFC test blocked",
-                RuntimeError("Connect a verified real six-node MFC rack first."),
-            )
-            return None
-        try:
-            state = self.mfc.apply_manual_test_setpoint(channel_index, value_sccm)
-        except Exception as exc:
-            self.handle_device_error("Manual MFC test failed", exc)
-            return None
-        self.state_changed.emit(state)
-        return state
 
     def zero_real_mfc_setpoints(self):
         """Explicit emergency/manual zero command for the verified real rack."""
@@ -392,7 +365,6 @@ class AcquisitionManager(QObject):
     def stop_experiment(self, message="Experiment finished"):
         self.acquisition_timer.stop()
         self.elapsed_timer.stop()
-        self.invalidate_control_timers()
         self.stop_recipe_execution()
 
         shutdown_ok = self.safe_shutdown_controls()
@@ -536,7 +508,6 @@ class AcquisitionManager(QObject):
         self.acquisition_timer.stop()
         self.elapsed_timer.stop()
         self.stop_flow_verify_timer.stop()
-        self.invalidate_control_timers()
         self.stop_recipe_execution()
         if not self.safe_shutdown_controls():
             message = "Stopped with MFC zeroing error; verify the rack immediately"
@@ -582,87 +553,6 @@ class AcquisitionManager(QObject):
         event = "; ".join(self.pending_events)
         self.pending_events = []
         return event
-
-    def next_control_timer_token(self, name):
-        self.control_timer_tokens[name] += 1
-        return self.control_timer_tokens[name]
-
-    def control_timer_is_current(self, name, token):
-        return self.control_timer_tokens.get(name) == token
-
-    def invalidate_control_timers(self):
-        for name in self.control_timer_tokens:
-            self.control_timer_tokens[name] += 1
-
-    def apply_nh3(self, flow_sccm, duration_ms=0):
-        if not self.safe_command("Set analyte flow failed", self.mfc.set_nh3_flow, flow_sccm):
-            return
-
-        token = self.next_control_timer_token("analyte")
-        self.set_event(f"Set analyte flow = {flow_sccm} sccm")
-        self.emit_state_changed()
-
-        if duration_ms > 0:
-            QTimer.singleShot(duration_ms, lambda token=token: self.reset_nh3(token))
-
-    def reset_nh3(self, timer_token=None):
-        if timer_token is not None and not self.control_timer_is_current("analyte", timer_token):
-            return
-
-        if not self.safe_command("Reset analyte flow failed", self.mfc.set_nh3_flow, 0):
-            return
-
-        self.set_event("Analyte duration ended")
-        self.emit_state_changed()
-
-    def apply_air(self, flow_sccm):
-        if not self.safe_command("Set Air flow failed", self.mfc.set_air_flow, flow_sccm):
-            return
-
-        self.set_event(f"Set Air flow = {flow_sccm} sccm")
-        self.emit_state_changed()
-
-    def air_purge(self):
-        if not self.safe_command("Air purge failed", self.mfc.air_purge):
-            return
-
-        self.next_control_timer_token("analyte")
-        self.set_event("Air purge")
-        self.emit_state_changed()
-
-    def set_humidity(self, enabled, duration_ms=0):
-        if not self.safe_command("Set humidity failed", self.mfc.set_humidity, enabled):
-            return False
-
-        token = self.next_control_timer_token("humidity")
-        state = "ON" if enabled else "OFF"
-        self.set_event(f"Humidity {state}")
-        self.emit_state_changed()
-
-        if enabled and duration_ms > 0:
-            QTimer.singleShot(duration_ms, lambda token=token: self.expire_humidity(token))
-        return True
-
-    def expire_humidity(self, timer_token):
-        if self.control_timer_is_current("humidity", timer_token):
-            self.set_humidity(False)
-
-    def set_heating(self, enabled, duration_ms=0):
-        if not self.safe_command("Set heating failed", self.mfc.set_heating, enabled):
-            return False
-
-        token = self.next_control_timer_token("heating")
-        state = "ON" if enabled else "OFF"
-        self.set_event(f"Heating {state}")
-        self.emit_state_changed()
-
-        if enabled and duration_ms > 0:
-            QTimer.singleShot(duration_ms, lambda token=token: self.expire_heating(token))
-        return True
-
-    def expire_heating(self, timer_token):
-        if self.control_timer_is_current("heating", timer_token):
-            self.set_heating(False)
 
     def acquire_once(self):
         # Acquisition order matters: read the control state first, then attach
@@ -817,25 +707,8 @@ class AcquisitionManager(QObject):
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             elapsed_s=elapsed,
             resistance_ohm=math.nan,
-            nh3_flow_sccm=state.nh3_flow_sccm if state is not None else math.nan,
-            air_flow_sccm=state.air_flow_sccm if state is not None else math.nan,
-            humidity_on=state.humidity_on if state is not None else False,
-            heating_on=state.heating_on if state is not None else False,
             event=message,
-            nh3_setpoint_sccm=state.nh3_setpoint_sccm if state is not None else math.nan,
-            nh3_actual_sccm=state.nh3_actual_sccm if state is not None else math.nan,
-            air_setpoint_sccm=state.air_setpoint_sccm if state is not None else math.nan,
-            air_actual_sccm=state.air_actual_sccm if state is not None else math.nan,
             multimeter_status="ERROR",
-            mfc_status=state.device_status if state is not None else "",
-            mfc_port=state.mfc_port if state is not None else "",
-            mfc_address=state.mfc_address if state is not None else "",
-            mfc_serial=state.mfc_serial if state is not None else "",
-            mfc_fluid=state.mfc_fluid if state is not None else "",
-            mfc_capacity_sccm=state.mfc_capacity_sccm if state is not None else math.nan,
-            mfc_capacity_unit=state.mfc_capacity_unit if state is not None else "",
-            mfc_temperature_c=state.mfc_temperature_c if state is not None else math.nan,
-            mfc_alarm_info=state.mfc_alarm_info if state is not None else "",
             mfc_channels=state.mfc_channels if state is not None else (),
             step_number=(self.recipe_step_index + 1 if self.recipe_step_index >= 0 else None),
             total_setpoint_mln_min=sum(
