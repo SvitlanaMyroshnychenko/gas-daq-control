@@ -22,7 +22,7 @@ For a real experiment, first confirm with the laboratory responsible person:
 2. Tubing reaches the mixing point, sensor chamber, and exhaust as intended.
 3. Gas pressure and the exhaust path are safe.
 4. The MFC rack is powered and connected to the PC.
-5. The Keithley multimeter is connected to the sensor and visible over VISA.
+5. Each required resistance multimeter is connected to its measurement circuit and visible over VISA. A second multimeter is optional.
 6. It is safe to command every MFC setpoint to zero.
 
 When any of these are uncertain, run only in **Simulated** mode.
@@ -59,13 +59,15 @@ There is no hidden default output folder for a normal run. If no folder is selec
 
 Use simulation to check the schedule, plots, file writing, and stop behavior. The MFC Monitor shows calculated setpoints and simulated actual values.
 
-### Real multimeter
+### Real multimeter(s)
 
 1. Open **Device Status**.
-2. Set Multimeter mode to real.
-3. Scan for VISA resources and choose the correct Keithley entry.
-4. Connect it.
-5. Confirm that **Current Readings** shows a plausible resistance.
+2. Set **Multimeter** to `Real`.
+3. Scan for VISA resources, choose the correct entry, and press **Connect**.
+4. If a second measurement channel is needed, set **Multimeter 2** to `Real`, select its separate VISA resource, and press **Connect**.
+5. Confirm that **Current Readings** shows plausible values for `Resistance` and, when enabled, `Resistance 2`.
+
+Do not select the same real VISA resource for both instruments. The app rejects that configuration. The two readings are acquired sequentially within each sampling interval, not by hardware-synchronized triggering. Confirm that this timing is suitable for the experiment before collecting scientific data.
 
 ### Real MFC rack
 
@@ -139,12 +141,12 @@ If the computed MFC6 value is negative or exceeds 30 mln/min, change RH, analyte
 
 1. Re-read all schedule rows and Event text.
 2. Check that the save folder and format are correct.
-3. For a real run, confirm Device Status shows a connected verified rack and connected multimeter.
+3. For a real run, confirm Device Status shows a connected verified rack and every enabled multimeter is connected. `Multimeter 2` may remain `Disabled` when it is not needed.
 4. Press **START**.
 5. Observe:
-   - Current Readings: resistance, rack capacity, total setpoint and actual flow;
+   - Current Readings: primary resistance, optional second resistance, rack capacity, total setpoint and actual flow;
    - MFC Monitor: actual and setpoint for every channel;
-   - Live Measurement: resistance or MFC-flow graph;
+   - Live Measurement: two resistance curves when Multimeter 2 is enabled, or MFC-flow graph;
    - Experiment Status: active step, planned/elapsed/remaining time and rate;
    - Log Preview: newest recorded data rows and Event.
 
@@ -162,11 +164,11 @@ Press **STOP** to end a run early. When the final schedule step finishes, the sa
 
 If a warning says that actual flow remains, do not assume the setup is safe just because setpoints show zero. Check the physical gas rack, valves, tubing, and outlet with laboratory supervision.
 
-The **Zero all setpoints** button in MFC Monitor is available only when an experiment is not running. It is an explicit manual safety action for a connected, verified real rack.
+The **Reset All** button in MFC Monitor is available only when an experiment is not running. It is an explicit manual safety action for a connected, verified real rack and sets every MFC setpoint to zero.
 
 ## 10. Output Files And Log Preview
 
-CSV/Excel contains one measurement row per sampling interval. `Event` is present in every row of an active schedule step. JSON metadata is a companion file containing the static experiment context: schedule, MFC identity and capacities, device mode, sampling rate, and completion information.
+CSV/Excel contains one measurement row per sampling interval. It includes `resistance_ohm`, `resistance_2_ohm`, `measurement_status`, and `measurement_2_status`. When Multimeter 2 is disabled, its resistance cell is empty. `Event` is present in every row of an active schedule step. JSON metadata is a companion file containing the static experiment context: schedule, MFC identity and capacities, both multimeter modes and real VISA resources, sampling rate, and completion information.
 
 Log Preview is only a bounded on-screen view. Its Rows control changes the number of stored recent rows shown in the table; it does not alter the file.
 
@@ -181,6 +183,8 @@ Log Preview is only a bounded on-screen view. Its Rows control changes the numbe
 | `Invalid MFC 4, 6` from calculator | Calculated humid or dry-air flow is outside its MFC limit. | Adjust RH, MFC1-3, MFC5, or Target total. |
 | Rack not verified / cannot connect | Wrong COM port, missing node, unexpected serial/capacity/unit, cable/power issue. | Stop, inspect the rack, scan again. Never select an unverified rack. |
 | Multimeter scan finds nothing | VISA driver/cable/device not available. | Verify USB connection and VISA installation, then scan again. |
+| Second multimeter cannot connect | Its VISA resource is unavailable, already selected for Multimeter 1, or the instrument does not answer the resistance query. | Verify that each instrument has its own resource, reconnect the cable, scan again, and compare with the device identity shown by VISA. |
+| `Second multimeter connection lost during measurement` | The enabled second instrument stopped responding. | The experiment stops to avoid an incomplete paired data row. Inspect the instrument, cable, VISA driver, and output file before restarting. |
 | `MFC alarm detected during experiment` | Controller reported an alarm. | Experiment stops automatically; inspect the physical controller and gas setup. |
 | `CRITICAL: MFC zero setpoints could not be confirmed` | Zero command or readback failed. | Treat as a lab safety issue; check hardware immediately. |
 | Actual flow remains after stop | Gas flow is still sensed after zero setpoint. | Inspect physical valves, tubing, pressure, and outlet. Do not start a new run until resolved. |

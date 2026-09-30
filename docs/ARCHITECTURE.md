@@ -2,7 +2,7 @@
 
 ## Purpose And Boundaries
 
-The project is a PySide6 desktop application. The UI coordinates an experiment, but hardware communication, state, schedule validation, and file writing live outside the visual components. This separation keeps a layout change from altering MFC safety behavior.
+The project is a PySide6 desktop application. The UI coordinates an experiment, but hardware communication, state, schedule validation, and file writing live outside the visual components. This separation keeps a layout change from altering MFC safety behavior. One primary multimeter is always present; a second independent multimeter is optional and disabled by default.
 
 ## Dependency Flow
 
@@ -31,7 +31,7 @@ User edits schedule
   -> real rack: verifies zero-setpoint preflight
   -> create CSV/XLSX + metadata JSON
   -> apply first six-MFC step
-  -> sample MFC state + resistance at configured rate
+  -> sample MFC state + primary resistance + optional second resistance at configured rate
   -> write record and update UI
   -> timer advances step or Stop requested
   -> safe_shutdown: command and confirm zero on all MFCs
@@ -54,8 +54,8 @@ The manager repeats validation even when the UI already checked it. This is a de
 
 | File | Responsibility | Used by |
 | --- | --- | --- |
-| `gas_sensor_daq/settings.py` | Defines the expected six-node rack, serials, capacities, default COM settings, and environment-variable overrides. | manager, rack, UI |
-| `gas_sensor_daq/models/records.py` | Defines MFC-channel snapshots, control state, measurement records, and the stable CSV/Excel schema. | devices, manager, logger, UI |
+| `gas_sensor_daq/settings.py` | Defines the expected six-node rack, serials, capacities, default COM settings, and primary/second multimeter mode and VISA-resource overrides. | manager, rack, UI |
+| `gas_sensor_daq/models/records.py` | Defines MFC-channel snapshots, control state, measurement records, and the stable CSV/Excel schema including both resistance channels. | devices, manager, logger, UI |
 
 The configured expected rack is:
 
@@ -73,16 +73,16 @@ The configured expected rack is:
 | File | Responsibility | Used by |
 | --- | --- | --- |
 | `core/experiment_design.py` | Flow constants, target-total comparison, theoretical rack-capacity calculation, and explicit duration parsing. | UI, manager |
-| `core/acquisition_manager.py` | Central state machine: Start/Stop, recipe steps, timers, sampling, errors, metadata, MFC zeroing and residual-flow warning. | `MainWindow` |
+| `core/acquisition_manager.py` | Central state machine: Start/Stop, recipe steps, timers, sequential primary/optional-second multimeter sampling, errors, metadata, MFC zeroing and residual-flow warning. | `MainWindow` |
 
-`AcquisitionManager` is the owner of safety-sensitive behavior. In particular, it validates every schedule step, starts real hardware only after preflight, applies reduced flows before increased flows at a transition, and calls `safe_shutdown_controls()` on Stop, completion, and normal close.
+`AcquisitionManager` is the owner of safety-sensitive behavior. In particular, it validates every schedule step, starts real hardware only after preflight, applies reduced flows before increased flows at a transition, and calls `safe_shutdown_controls()` on Stop, completion, and normal close. It creates the optional second multimeter through the same adapter factory, rejects an attempt to use the same real VISA resource for both instruments, and stops acquisition if either enabled multimeter fails.
 
 ### Device Layer
 
 | File | Responsibility | Parent/consumer |
 | --- | --- | --- |
 | `devices/base.py` | Device interface contracts. | factory and adapters |
-| `devices/factory.py` | Creates simulated or real device adapters from settings. | acquisition manager |
+| `devices/factory.py` | Creates simulated or real MFC/multimeter adapters from settings; one multimeter adapter instance is used per enabled instrument. | acquisition manager |
 | `devices/fake_multimeter.py` | Simulated resistance values. | factory |
 | `devices/fake_mfc.py` | Six-channel simulated MFC rack with capacity validation. | factory |
 | `devices/scpi_resistance_multimeter.py` | Real SCPI/VISA resistance measurement adapter. | factory |
@@ -97,7 +97,7 @@ The configured expected rack is:
 | --- | --- | --- |
 | `logging/data_logger.py` | CSV and Excel writers; adjacent JSON metadata; stable export-field order. | acquisition manager |
 
-CSV uses a `DictWriter`. Excel uses a `Data` sheet plus a `Metadata` sheet. Both formats use the same per-sample fields. The separate metadata JSON is intended for reproducibility and contains identity/configuration information which should not be duplicated in every data row.
+CSV uses a `DictWriter`. Excel uses a `Data` sheet plus a `Metadata` sheet. Both formats use the same per-sample fields. Schema version 4 adds `resistance_2_ohm` and `measurement_2_status`; its companion JSON records the mode and real VISA resource of each multimeter. The separate metadata JSON is intended for reproducibility and contains identity/configuration information which should not be duplicated in every data row.
 
 ### UI Composition
 
@@ -105,15 +105,15 @@ CSV uses a `DictWriter`. Excel uses a `Data` sheet plus a `Metadata` sheet. Both
 | --- | --- | --- |
 | `ui/main_window.py` | Connects panels to the manager, validates/edit schedule, updates all displayed state, controls UI enablement. | `main.py` |
 | `ui/toolbar.py` | File name/path, format, folder selection, Start and Stop controls. | `MainWindow` |
-| `ui/current_readings.py` | Resistance, rack capacity, current total setpoint and actual flow panel. | `MainWindow` |
-| `ui/live_measurement.py` | Resistance/MFC-flow view composition. | `MainWindow` |
+| `ui/current_readings.py` | Primary and second resistance, rack capacity, current total setpoint and actual flow panel. | `MainWindow` |
+| `ui/live_measurement.py` | Two-resistance and MFC-flow view composition, including legends. | `MainWindow` |
 | `ui/plot_widgets.py` | Pyqtgraph plot widgets and presentation helpers. | live measurement / main window |
-| `ui/mfc_monitor.py` | Six-channel actual/setpoint monitor, serial detail, and manual zero-all control. | `MainWindow` |
-| `ui/device_status.py` | Device mode, scan, selection, verification and connection controls. | `MainWindow` |
+| `ui/mfc_monitor.py` | Six-channel actual/setpoint monitor, serial detail, and manual `Reset All` control. | `MainWindow` |
+| `ui/device_status.py` | Primary/second multimeter and MFC mode, scan, selection, verification and connection controls. | `MainWindow` |
 | `ui/experiment_status.py` | Idle/running/completed/stopped/error experiment status summary. | `MainWindow` |
 | `ui/experiment_schedule.py` | Schedule card layout, event actions, target/rate controls, and expandable mixture calculator. | `MainWindow` |
 | `ui/recipe_table.py` | Schedule table presentation and editing behavior. | `MainWindow` |
-| `ui/log_preview.py` | Bounded recent-record preview table, row selector and column sizing. | `MainWindow` |
+| `ui/log_preview.py` | Bounded recent-record preview table with both resistance columns, row selector and column sizing. | `MainWindow` |
 | `ui/log_table.py` | Log-preview formatting/presentation helpers. | log UI |
 | `ui/formatting.py` | Shared text/number presentation helpers. | UI modules |
 | `ui/styles.py` | Application-wide Qt stylesheet. | `MainWindow` |
@@ -144,13 +144,15 @@ It never replaces final validation. Directly edited table values go through the 
 
 ## Signals And UI State
 
-The manager emits state, acquired data, elapsed time, active step, errors, flow warnings, experiment start, and experiment stop signals. `MainWindow` maps those signals to panels. It disables schedule mutation, output settings, sampling-rate edits, and the manual zero button when a run is active.
+The manager emits state, acquired data, elapsed time, active step, errors, flow warnings, experiment start/stop, and independent primary/second multimeter connection signals. `MainWindow` maps those signals to panels. It disables schedule mutation, output settings, sampling-rate edits, multimeter reconfiguration, and the manual `Reset All` button when a run is active.
 
 ## Tests
 
 | File | Coverage |
 | --- | --- |
 | `tests/test_acquisition_manager_shutdown.py` | Start-location requirement; Stop/completion file closure; all-channel zeroing; critical failure reporting. |
+| `tests/test_data_logger.py` | Primary/second resistance export and empty second-channel behavior when disabled. |
+| `tests/test_experiment_design.py` | Mixture-calculator rules, target-flow validation, and duration parsing. |
 | `tests/test_propar_mfc_rack.py` | Node/capacity/unit/serial verification; six-channel reads; per-channel capacity limits; controlled recipe transitions; zero confirmation. |
 
 Run all tests with:

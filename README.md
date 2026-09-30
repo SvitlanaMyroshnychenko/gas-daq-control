@@ -1,12 +1,13 @@
 # Gas Sensor DAQ & MFC Control
 
-Desktop application for gas-sensor experiments with a Keithley resistance multimeter and a verified six-channel Bronkhorst MFC rack. It provides an experiment schedule, live resistance and flow monitoring, acquisition logging, and safe MFC shutdown.
+Desktop application for gas-sensor experiments with one or two resistance multimeters and a verified six-channel Bronkhorst MFC rack. It provides an experiment schedule, live resistance and flow monitoring, acquisition logging, and safe MFC shutdown.
 
 ## What The Application Does
 
 - controls an experiment as a sequence of timed gas-mixture steps;
 - supports six MFC channels with verified serial numbers and individual flow capacities;
-- acquires sensor resistance from a simulated or real SCPI/VISA multimeter;
+- acquires resistance from a primary and optional second simulated or real SCPI/VISA multimeter;
+- records both channels in the same sample row and stops the experiment if either enabled multimeter fails;
 - displays MFC setpoints and actual flows during the experiment;
 - writes a CSV or Excel measurement file plus adjacent JSON metadata;
 - validates the schedule before Start and prevents invalid MFC setpoints;
@@ -31,7 +32,7 @@ The interface and all flow values use `mln/min`, the normalized-flow unit report
    ```
 
 3. Choose a directory with the folder button in the **File** area. Recording cannot start until an output directory is selected.
-4. Keep both devices in **Simulated** mode unless the laboratory setup is ready.
+4. Keep the MFC rack and Multimeter 1 in **Simulated** mode unless the laboratory setup is ready. Multimeter 2 is **Disabled** by default; enable it only when a second measurement channel is needed.
 5. Edit the **Experiment Schedule**, validate any warnings, then press **START**.
 
 For the complete laboratory workflow and error recovery, read [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
@@ -60,13 +61,13 @@ For each Start, the app creates a timestamped data file in the selected folder:
 - `name_YYYY-MM-DD_HH-MM-SS.csv`, or
 - `name_YYYY-MM-DD_HH-MM-SS.xlsx`.
 
-It also writes `name_YYYY-MM-DD_HH-MM-SS.metadata.json`. The JSON file records the schedule, selected device modes, sampling rate, MFC identities/capacities, and start/end metadata. It is not a second stream of measurements.
+It also writes `name_YYYY-MM-DD_HH-MM-SS.metadata.json`. The JSON file records the schedule, selected device modes and VISA resources, sampling rate, MFC identities/capacities, and start/end metadata. It is not a second stream of measurements.
 
 The per-sample CSV/Excel columns are:
 
 ```text
-timestamp, elapsed_s, step_number, event, resistance_ohm,
-total_setpoint_mln_min, total_actual_mln_min, measurement_status,
+timestamp, elapsed_s, step_number, event, resistance_ohm, resistance_2_ohm,
+total_setpoint_mln_min, total_actual_mln_min, measurement_status, measurement_2_status,
 mfc1_setpoint_mln_min, mfc1_actual_mln_min, ...,
 mfc6_setpoint_mln_min, mfc6_actual_mln_min
 ```
