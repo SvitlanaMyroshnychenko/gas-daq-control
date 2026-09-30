@@ -1318,11 +1318,11 @@ class MainWindow(QMainWindow):
         if dialog.clickedButton() != clear_button:
             return
 
-        self.recipe_table.blockSignals(True)
+        signals_were_blocked = self.recipe_table.blockSignals(True)
         try:
             clear_recipe_steps(self.recipe_table)
         finally:
-            self.recipe_table.blockSignals(False)
+            self.recipe_table.blockSignals(signals_were_blocked)
         self.on_recipe_selection_changed()
         self.validate_recipe_live()
 
@@ -1444,13 +1444,13 @@ class MainWindow(QMainWindow):
             total_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.recipe_table.setItem(row, 1, total_item)
 
-        self.recipe_table.blockSignals(True)
+        signals_were_blocked = self.recipe_table.blockSignals(True)
         try:
             total_item.setText("--" if invalid_value else f"{sum(values):g}")
             style_recipe_total_item(total_item)
             self.update_recipe_rh(row)
         finally:
-            self.recipe_table.blockSignals(False)
+            self.recipe_table.blockSignals(signals_were_blocked)
 
     def apply_recipe_rh_from_table(self, row):
         """Use a manually entered RH target to update the humid-air MFC flow."""
@@ -1463,7 +1463,7 @@ class MainWindow(QMainWindow):
             return
 
         target_total = self.recipe_target_total_input.value()
-        self.recipe_table.blockSignals(True)
+        signals_were_blocked = self.recipe_table.blockSignals(True)
         try:
             mfc4_item.setText(f"{target_total * rh / 100:g}")
             mfc6_item = self.recipe_table.item(row, 9)
@@ -1475,7 +1475,7 @@ class MainWindow(QMainWindow):
                 mfc6_item.setText(f"{target_total - other_flows:g}")
             self.update_recipe_total_from_setpoints(row)
         finally:
-            self.recipe_table.blockSignals(False)
+            self.recipe_table.blockSignals(signals_were_blocked)
 
     def update_recipe_rh(self, row):
         target_total = self.recipe_target_total_input.value()
@@ -1499,7 +1499,7 @@ class MainWindow(QMainWindow):
             return
 
         scale = new_target / previous_target
-        self.recipe_table.blockSignals(True)
+        signals_were_blocked = self.recipe_table.blockSignals(True)
         try:
             for row in range(self.recipe_table.rowCount()):
                 for column in range(4, 10):
@@ -1510,7 +1510,7 @@ class MainWindow(QMainWindow):
                     item.setText(f"{value * scale:.6g}")
                 self.update_recipe_total(self.recipe_table.item(row, 4))
         finally:
-            self.recipe_table.blockSignals(False)
+            self.recipe_table.blockSignals(signals_were_blocked)
 
         self._last_recipe_target_total = new_target
         self.on_recipe_selection_changed()
@@ -1778,14 +1778,14 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.recipe_table.blockSignals(True)
+        signals_were_blocked = self.recipe_table.blockSignals(True)
         try:
             for index, value in setpoints.items():
                 item = self.recipe_table.item(row, index + 3)
                 if item is not None:
                     item.setText(f"{max(0.0, value):g}")
         finally:
-            self.recipe_table.blockSignals(False)
+            self.recipe_table.blockSignals(signals_were_blocked)
 
         self.update_recipe_total(self.recipe_table.item(row, 4))
         if not recipe_event(self.recipe_table, row):
