@@ -455,6 +455,11 @@ def application_style(chevron_down_path: str) -> str:
                 font-size: 14px;
                 font-weight: 700;
             }
+            QLabel#metricValue[readingColor="orange"] {
+                color: #f97316;
+                font-size: 14px;
+                font-weight: 700;
+            }
             QLabel#metricValue[readingColor="slate"] {
                 color: #64748b;
                 font-size: 14px;
@@ -500,6 +505,9 @@ def application_style(chevron_down_path: str) -> str:
             }
             QLabel#connectedLabel[state="disconnected"] {
                 color: #dc2626;
+            }
+            QLabel#connectedLabel[state="disabled"] {
+                color: #64748b;
             }
             QLabel#connectedLabel[state="verified"] {
                 color: #b45309;
@@ -581,6 +589,9 @@ def application_style(chevron_down_path: str) -> str:
             }
             QLabel#deviceStatusDot[state="disconnected"] {
                 background: #dc2626;
+            }
+            QLabel#deviceStatusDot[state="disabled"] {
+                background: #94a3b8;
             }
             QLabel#deviceStatusDot[state="verified"] {
                 background: #d97706;
@@ -1076,5 +1087,6 @@ def application_style(chevron_down_path: str) -> str:
                 border-right: 1px solid #e2e8f0;
                 border-bottom: 1px solid #e2e8f0;
                 padding: 2px 5px;
+            }
     """.replace("__CHEVRON_DOWN__", chevron_down_path)
 

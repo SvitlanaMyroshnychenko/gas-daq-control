@@ -23,7 +23,7 @@ class MFCMonitorPanel:
             content.addWidget(row)
             self.channel_monitor[index] = widgets
 
-        self.zero_setpoints_button = QPushButton("Zero all setpoints")
+        self.zero_setpoints_button = QPushButton("Reset All")
         self.zero_setpoints_button.setObjectName("mfcZeroButton")
         self.zero_setpoints_button.setToolTip(
             "Set all MFC setpoints to zero when no experiment is running"

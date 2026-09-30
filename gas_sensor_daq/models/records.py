@@ -1,5 +1,6 @@
 from dataclasses import asdict, dataclass
 
+# Second multimeter added
 
 MFC_CHANNEL_COUNT = 6
 
@@ -23,9 +24,11 @@ FIELDNAMES = [
     "step_number",
     "event",
     "resistance_ohm",
+    "resistance_2_ohm",
     "total_setpoint_mln_min",
     "total_actual_mln_min",
     "measurement_status",
+    "measurement_2_status",
     *mfc_channel_fieldnames(),
 ]
 
@@ -72,6 +75,8 @@ class MeasurementRecord:
     timestamp: str
     elapsed_s: float
     resistance_ohm: float
+    resistance_2_ohm: float | None = None
+    multimeter_2_status: str = "Disabled"
     event: str = ""
     multimeter_status: str = "Simulated"
     mfc_channels: tuple[MFCChannelState, ...] = ()
@@ -84,4 +89,5 @@ class MeasurementRecord:
         data.pop("mfc_channels", None)
         return data | mfc_channel_export_fields(self.mfc_channels) | {
             "measurement_status": self.multimeter_status,
+            "measurement_2_status": self.multimeter_2_status,
         }

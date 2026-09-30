@@ -10,12 +10,13 @@ class LogPreviewTable(QTableWidget):
         "Elapsed",
         "Step",
         "Resistance\n(Ohm)",
+        "Resistance 2\n(Ohm)",
         "Setpoint total\n(mln/min)",
         "Actual total\n(mln/min)",
         "Event",
     )
-    DEFAULT_WIDTHS = (110, 68, 56, 100, 118, 118, 190)
-    WIDTH_RATIOS = (0.16, 0.09, 0.07, 0.14, 0.14, 0.14, 0.26)
+    DEFAULT_WIDTHS = (108, 66, 52, 92, 92, 110, 110, 190)
+    WIDTH_RATIOS = (0.13, 0.08, 0.06, 0.12, 0.12, 0.13, 0.13, 0.23)
     MAX_STORED_RECORDS = 50
 
     def __init__(self, parent=None):

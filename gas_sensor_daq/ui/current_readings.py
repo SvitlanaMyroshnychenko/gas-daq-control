@@ -7,12 +7,20 @@ from gas_sensor_daq.ui.widgets.cards import compact_section_card
 class CurrentReadingsPanel:
     """Compact presentation of the latest sensor and total-flow readings."""
 
-    def __init__(self, resistance, rack_capacity, setpoint_total, actual_total):
+    def __init__(
+        self,
+        resistance,
+        resistance_2,
+        rack_capacity,
+        setpoint_total,
+        actual_total,
+    ):
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         for name, description, value, color in (
             ("Resistance", "Sensor measurement", resistance, "blue"),
+            ("Resistance 2", "Second measurement", resistance_2, "orange"),
             ("Rack capacity", "Maximum available flow", rack_capacity, "slate"),
             ("Current setpoint flow", "Target flow", setpoint_total, "teal"),
             ("Current actual flow", "Measured flow", actual_total, "purple"),

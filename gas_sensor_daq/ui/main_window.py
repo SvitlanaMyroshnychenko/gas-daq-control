@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         self.manager = AcquisitionManager(self)
         self.time_data = []
         self.resistance_data = []
+        self.resistance_2_data = []
         self.mfc_flow_data = {index: [] for index in range(1, 7)}
         self.mfc_channel_colors = {
             1: "#2563eb",
@@ -181,7 +182,7 @@ class MainWindow(QMainWindow):
         self.choose_save_location_button.setIconSize(QSize(16, 16))
         self.choose_save_location_button.setToolTip("Choose save location")
         self.choose_save_location_button.clicked.connect(self.choose_save_location)
-        self.system_message_label = QLabel("All systems normal. Ready.")
+        self.system_message_label = QLabel("Ready")
         self.system_message_label.setObjectName("systemMessageText")
 
         self.format_selector = QComboBox()
@@ -236,6 +237,44 @@ class MainWindow(QMainWindow):
         self.multimeter_status_label.setObjectName("connectedLabel")
         self.multimeter_status_label.setWordWrap(True)
         self.multimeter_status_label.setMaximumHeight(34)
+        self.multimeter_2_mode_selector = QComboBox()
+        self.multimeter_2_mode_selector.addItem("Disabled", "disabled")
+        self.multimeter_2_mode_selector.addItem("Simulated", "simulation")
+        self.multimeter_2_mode_selector.addItem("Real", "real")
+        self.multimeter_2_mode_selector.setItemData(
+            0,
+            "Second multimeter disabled",
+            Qt.ToolTipRole,
+        )
+        self.multimeter_2_mode_selector.setItemData(
+            1,
+            "Second multimeter simulation mode",
+            Qt.ToolTipRole,
+        )
+        self.multimeter_2_mode_selector.setItemData(
+            2,
+            "Second multimeter real-device mode",
+            Qt.ToolTipRole,
+        )
+        self.visa_device_2_selector = QComboBox()
+        self.visa_device_2_selector.addItem("Not scanned", "")
+        self.visa_device_2_selector.setMinimumWidth(0)
+        self.multimeter_2_resource_input = QLineEdit()
+        self.multimeter_2_resource_input.setPlaceholderText("USB0::...::INSTR")
+        self.multimeter_2_resource_input.setText(self.manager.multimeter_2_resource)
+        self.multimeter_2_resource_input.setVisible(False)
+        self.scan_visa_2_button = QPushButton("Scan")
+        self.connect_multimeter_2_button = QPushButton("Use")
+        self.scan_visa_2_button.setFixedWidth(76)
+        self.connect_multimeter_2_button.setFixedWidth(76)
+        self.multimeter_2_status_label = QLabel(
+            self.manager.multimeter_2_status_text()
+        )
+        self.multimeter_2_status_label.setObjectName("connectedLabel")
+        self.multimeter_2_status_label.setWordWrap(True)
+        self.multimeter_2_status_label.setMaximumHeight(34)
+        self.multimeter_2_summary_label = QLabel("Disabled")
+        self.multimeter_2_summary_label.setObjectName("connectedLabel")
         self.mfc_status_label = QLabel("Connected: Simulated")
         self.mfc_status_label.setObjectName("connectedLabel")
         self.mfc_status_label.setWordWrap(True)
@@ -276,15 +315,18 @@ class MainWindow(QMainWindow):
         )
 
         self.resistance_value_label = self.metric_value("--")
+        self.resistance_2_value_label = self.metric_value("--")
         self.max_total_flow_label = self.metric_value("--")
         self.total_actual_label = self.metric_value("--")
         self.total_setpoint_label = self.metric_value("--")
         self.resistance_value_label.setProperty("metricColor", "blue")
+        self.resistance_2_value_label.setProperty("metricColor", "orange")
         self.max_total_flow_label.setProperty("metricColor", "slate")
         self.total_actual_label.setProperty("metricColor", "purple")
         self.total_setpoint_label.setProperty("metricColor", "teal")
         for value_label in (
             self.resistance_value_label,
+            self.resistance_2_value_label,
             self.max_total_flow_label,
             self.total_actual_label,
             self.total_setpoint_label,
@@ -294,6 +336,14 @@ class MainWindow(QMainWindow):
         self.connect_multimeter_button.clicked.connect(self.connect_multimeter)
         self.multimeter_mode_selector.currentTextChanged.connect(self.on_multimeter_mode_changed)
         self.visa_device_selector.currentIndexChanged.connect(self.on_visa_device_selected)
+        self.scan_visa_2_button.clicked.connect(self.scan_visa_devices)
+        self.connect_multimeter_2_button.clicked.connect(self.connect_multimeter_2)
+        self.multimeter_2_mode_selector.currentTextChanged.connect(
+            self.on_multimeter_2_mode_changed
+        )
+        self.visa_device_2_selector.currentIndexChanged.connect(
+            self.on_visa_device_2_selected
+        )
         self.scan_mfc_button.clicked.connect(self.scan_mfc_ports)
         self.connect_mfc_button.clicked.connect(self.connect_mfc)
         self.mfc_mode_selector.currentTextChanged.connect(self.on_mfc_mode_changed)
@@ -301,11 +351,14 @@ class MainWindow(QMainWindow):
         self.resistance_plot = self.create_plot(
             "Resistance vs Time",
             "Resistance",
-            "Î©",
+            "Ω",
             "#2563eb",
         )
         self.resistance_curve = self.resistance_plot.plot(
             pen=pg.mkPen(color="#2563eb", width=2)
+        )
+        self.resistance_2_curve = self.resistance_plot.plot(
+            pen=pg.mkPen(color="#f97316", width=2)
         )
 
         self.flow_plot = self.create_plot(
@@ -474,6 +527,9 @@ class MainWindow(QMainWindow):
 
         self.apply_styles()
         self.on_multimeter_mode_changed(self.multimeter_mode_selector.currentText())
+        self.on_multimeter_2_mode_changed(
+            self.multimeter_2_mode_selector.currentText()
+        )
         self.on_mfc_mode_changed(self.mfc_mode_selector.currentText())
         self.update_experiment_status()
 
@@ -488,6 +544,7 @@ class MainWindow(QMainWindow):
         self.manager.state_changed.connect(self.refresh_state_label)
         self.manager.device_error.connect(self.on_device_error)
         self.manager.multimeter_changed.connect(self.on_multimeter_changed)
+        self.manager.multimeter_2_changed.connect(self.on_multimeter_2_changed)
         self.manager.mfc_changed.connect(self.on_mfc_changed)
         self.manager.recipe_step_changed.connect(self.on_recipe_step_changed)
         self.manager.flow_warning.connect(self.on_flow_warning)
@@ -584,6 +641,7 @@ class MainWindow(QMainWindow):
 
         readings_panel = CurrentReadingsPanel(
             self.resistance_value_label,
+            self.resistance_2_value_label,
             self.max_total_flow_label,
             self.total_setpoint_label,
             self.total_actual_label,
@@ -612,11 +670,16 @@ class MainWindow(QMainWindow):
         live_measurement = LiveMeasurementPanel(
             self.resistance_plot,
             self.flow_plot,
+            {
+                "Resistance 1": "#2563eb",
+                "Resistance 2": "#f97316",
+            },
             self.mfc_channel_colors,
             self.set_active_plot,
         )
         self.resistance_plot_button = live_measurement.resistance_button
         self.flow_plot_button = live_measurement.flow_button
+        self.resistance_legend = live_measurement.resistance_legend
         self.flow_legend = live_measurement.flow_legend
         self.event_summary = live_measurement.event_summary
         self.event_summary_dot = live_measurement.event_summary_dot
@@ -687,6 +750,13 @@ class MainWindow(QMainWindow):
             scan_multimeter=self.scan_visa_button,
             multimeter_status=self.multimeter_status_label,
             multimeter_summary=self.multimeter_summary_label,
+            multimeter_2_mode=self.multimeter_2_mode_selector,
+            multimeter_2_device=self.visa_device_2_selector,
+            multimeter_2_resource=self.multimeter_2_resource_input,
+            connect_multimeter_2=self.connect_multimeter_2_button,
+            scan_multimeter_2=self.scan_visa_2_button,
+            multimeter_2_status=self.multimeter_2_status_label,
+            multimeter_2_summary=self.multimeter_2_summary_label,
             mfc_mode=self.mfc_mode_selector,
             mfc_port=self.mfc_port_selector,
             connect_mfc=self.connect_mfc_button,
@@ -699,6 +769,7 @@ class MainWindow(QMainWindow):
         self.device_setup_bodies = device_panel.setup_bodies
         self.device_control_rows = device_panel.control_rows
         self.multimeter_status_dot = device_panel.multimeter_status_dot
+        self.multimeter_2_status_dot = device_panel.multimeter_2_status_dot
         self.mfc_status_dot = device_panel.mfc_status_dot
         self.device_status_chevron = device_panel.chevron
         self.device_status_chevron.setIcon(self.chevron_icon(expanded=False))
@@ -1062,12 +1133,14 @@ class MainWindow(QMainWindow):
 
         self.time_data.clear()
         self.resistance_data.clear()
+        self.resistance_2_data.clear()
         for values in self.mfc_flow_data.values():
             values.clear()
         self.clear_event_markers()
         self.log_table.clear_records()
 
         self.resistance_curve.setData([], [])
+        self.resistance_2_curve.setData([], [])
         for curve in self.flow_curves.values():
             curve.setData([], [])
 
@@ -1267,6 +1340,13 @@ class MainWindow(QMainWindow):
                 self.on_device_error("Select Connect before starting with a real multimeter.")
                 return False
 
+        if self.is_real_multimeter_2_mode():
+            if self.manager.multimeter_2_mode != "real":
+                self.on_device_error(
+                    "Select Connect before starting with the second real multimeter."
+                )
+                return False
+
         if self.is_real_mfc_mode():
             if self.manager.mfc_mode != "real":
                 self.on_device_error("Select Connect before starting with a real MFC controller.")
@@ -1276,6 +1356,9 @@ class MainWindow(QMainWindow):
 
     def is_real_multimeter_mode(self):
         return self.multimeter_mode_selector.currentData() == "real"
+
+    def is_real_multimeter_2_mode(self):
+        return self.multimeter_2_mode_selector.currentData() == "real"
 
     def is_real_mfc_mode(self):
         return self.mfc_mode_selector.currentData() == "real"
@@ -2032,6 +2115,18 @@ class MainWindow(QMainWindow):
         self.multimeter_resource_input.setEnabled(setup_enabled and multimeter_real)
         self.scan_visa_button.setEnabled(setup_enabled and multimeter_real)
 
+        multimeter_2_mode = self.multimeter_2_mode_selector.currentData()
+        multimeter_2_real = self.is_real_multimeter_2_mode()
+        self.multimeter_2_mode_selector.setEnabled(setup_enabled)
+        self.connect_multimeter_2_button.setEnabled(
+            setup_enabled and multimeter_2_mode != "disabled"
+        )
+        self.visa_device_2_selector.setEnabled(setup_enabled and multimeter_2_real)
+        self.multimeter_2_resource_input.setEnabled(
+            setup_enabled and multimeter_2_real
+        )
+        self.scan_visa_2_button.setEnabled(setup_enabled and multimeter_2_real)
+
         self.mfc_mode_selector.setEnabled(setup_enabled)
         self.connect_mfc_button.setEnabled(setup_enabled)
         self.mfc_port_selector.setEnabled(setup_enabled and mfc_real)
@@ -2075,41 +2170,104 @@ class MainWindow(QMainWindow):
                 self.manager.set_multimeter_mode("simulation", "")
         self.update_device_setup_controls_enabled()
 
+    def on_multimeter_2_mode_changed(self, _text):
+        mode = self.multimeter_2_mode_selector.currentData()
+        is_real = mode == "real"
+        self.multimeter_2_mode_selector.setToolTip(
+            "Second real multimeter mode"
+            if is_real
+            else (
+                "Second multimeter simulation mode"
+                if mode == "simulation"
+                else "Second multimeter disabled"
+            )
+        )
+        self.connect_multimeter_2_button.setText("Connect" if is_real else "Use")
+
+        if mode == "disabled":
+            self.set_connection_label(
+                self.multimeter_2_status_label,
+                "Disabled",
+                "disabled",
+            )
+            self.set_device_summary(
+                self.multimeter_2_summary_label,
+                self.multimeter_2_status_dot,
+                "Disabled",
+                "disabled",
+            )
+            if self.manager.multimeter_2_mode != "disabled":
+                self.manager.set_multimeter_2_mode("disabled", "")
+        elif is_real:
+            self.set_connection_label(
+                self.multimeter_2_status_label,
+                "Not connected",
+                "disconnected",
+            )
+            self.set_device_summary(
+                self.multimeter_2_summary_label,
+                self.multimeter_2_status_dot,
+                "Not Connected",
+                "disconnected",
+            )
+        else:
+            self.set_connection_label(
+                self.multimeter_2_status_label,
+                "Connected: Simulated",
+                "connected",
+            )
+            self.set_device_summary(
+                self.multimeter_2_summary_label,
+                self.multimeter_2_status_dot,
+                "Simulated",
+                "connected",
+            )
+            if self.manager.multimeter_2_mode != "simulation":
+                self.manager.set_multimeter_2_mode("simulation", "")
+        self.update_device_setup_controls_enabled()
+
     def scan_visa_devices(self):
         if self.is_experiment_running():
             return
 
-        self.visa_device_selector.clear()
-        self.visa_device_selector.addItem("Scanning...", "")
-        self.visa_device_selector.setEnabled(False)
+        selectors = (self.visa_device_selector, self.visa_device_2_selector)
+        for selector in selectors:
+            selector.clear()
+            selector.addItem("Scanning...", "")
+            selector.setEnabled(False)
         self.scan_visa_button.setEnabled(False)
+        self.scan_visa_2_button.setEnabled(False)
 
         try:
             instruments = discover_visa_instruments()
         except Exception as exc:
-            self.visa_device_selector.clear()
-            self.visa_device_selector.addItem("Scan failed", "")
+            for selector in selectors:
+                selector.clear()
+                selector.addItem("Scan failed", "")
             self.on_device_error(f"VISA scan failed: {exc}")
             return
         finally:
             self.update_device_setup_controls_enabled()
 
-        self.visa_device_selector.clear()
+        for selector in selectors:
+            selector.clear()
         if not instruments:
-            self.visa_device_selector.addItem("No device", "")
-            self.visa_device_selector.setItemData(
-                0, "No VISA instruments found.", Qt.ToolTipRole
-            )
+            for selector in selectors:
+                selector.addItem("No device", "")
+                selector.setItemData(
+                    0, "No VISA instruments found.", Qt.ToolTipRole
+                )
             self.file_label.setText("No VISA instruments found")
             return
 
         for instrument in instruments:
-            self.visa_device_selector.addItem(
-                self.compact_instrument_label(instrument.idn, instrument.resource),
-                instrument.resource,
-            )
-            index = self.visa_device_selector.count() - 1
-            self.visa_device_selector.setItemData(index, instrument.label, Qt.ToolTipRole)
+            for selector in selectors:
+                selector.addItem(
+                    self.compact_instrument_label(instrument.idn, instrument.resource),
+                    instrument.resource,
+                )
+                index = selector.count() - 1
+                selector.setItemData(index, instrument.label, Qt.ToolTipRole)
 
         self.file_label.setText(f"Found {len(instruments)} VISA instrument(s)")
 
@@ -2118,6 +2276,12 @@ class MainWindow(QMainWindow):
         if resource:
             self.multimeter_resource_input.setText(resource)
             self.multimeter_resource_input.setToolTip(resource)
+
+    def on_visa_device_2_selected(self):
+        resource = self.visa_device_2_selector.currentData()
+        if resource:
+            self.multimeter_2_resource_input.setText(resource)
+            self.multimeter_2_resource_input.setToolTip(resource)
 
     @staticmethod
     def compact_instrument_label(idn, resource):
@@ -2183,6 +2347,75 @@ class MainWindow(QMainWindow):
                 "connected",
             )
             self.multimeter_status_label.setToolTip(status)
+
+    def connect_multimeter_2(self):
+        if self.is_experiment_running():
+            return
+
+        mode = self.multimeter_2_mode_selector.currentData()
+        if mode == "real":
+            resource = self.multimeter_2_resource_input.text().strip()
+            if not resource:
+                self.on_device_error(
+                    "Select a VISA resource before connecting the second multimeter."
+                )
+                return
+            ok = self.manager.set_multimeter_2_mode("real", resource)
+        elif mode == "simulation":
+            ok = self.manager.set_multimeter_2_mode("simulation", "")
+        else:
+            ok = self.manager.set_multimeter_2_mode("disabled", "")
+
+        if ok:
+            self.status_label.setText("IDLE")
+            self.set_status_badge_state("idle")
+            self.file_label.setText("Second multimeter ready")
+        elif mode == "real":
+            self.set_device_summary(
+                self.multimeter_2_summary_label,
+                self.multimeter_2_status_dot,
+                "Not Connected",
+                "disconnected",
+            )
+
+    def on_multimeter_2_changed(self, mode, status):
+        if mode == "disabled":
+            self.set_connection_label(
+                self.multimeter_2_status_label,
+                "Disabled",
+                "disabled",
+            )
+            self.set_device_summary(
+                self.multimeter_2_summary_label,
+                self.multimeter_2_status_dot,
+                "Disabled",
+                "disabled",
+            )
+        elif mode == "real":
+            self.set_connection_label(
+                self.multimeter_2_status_label,
+                "Connected: real multimeter",
+                "connected",
+            )
+            self.set_device_summary(
+                self.multimeter_2_summary_label,
+                self.multimeter_2_status_dot,
+                "Connected",
+                "connected",
+            )
+        else:
+            self.set_connection_label(
+                self.multimeter_2_status_label,
+                "Connected: Simulated",
+                "connected",
+            )
+            self.set_device_summary(
+                self.multimeter_2_summary_label,
+                self.multimeter_2_status_dot,
+                "Simulated",
+                "connected",
+            )
+        self.multimeter_2_status_label.setToolTip(status)
 
     def on_mfc_mode_changed(self, _text):
         is_real = self.is_real_mfc_mode()
@@ -2452,7 +2685,7 @@ class MainWindow(QMainWindow):
                 f"Real rack | {port} | {self.manager.settings.mfc_baudrate} | 6/6 verified"
             )
         elif verified:
-            self.mfc_rack_status_label.setText("Simulation Â· 6 channels")
+            self.mfc_rack_status_label.setText("Simulation - 6 channels")
         elif self.manager.mfc_mode == "real":
             self.mfc_rack_status_label.setText("Real rack | not connected")
         else:
@@ -2519,8 +2752,13 @@ class MainWindow(QMainWindow):
     def on_data_acquired(self, data, event):
         self.time_data.append(data["elapsed_s"])
         self.resistance_data.append(data["resistance_ohm"])
+        resistance_2 = data.get("resistance_2_ohm")
+        self.resistance_2_data.append(
+            resistance_2 if resistance_2 is not None else math.nan
+        )
 
         self.resistance_curve.setData(self.time_data, self.resistance_data)
+        self.resistance_2_curve.setData(self.time_data, self.resistance_2_data)
         for index, curve in self.flow_curves.items():
             value = data.get(f"mfc{index}_actual_mln_min", math.nan)
             self.mfc_flow_data[index].append(value)
@@ -2531,6 +2769,9 @@ class MainWindow(QMainWindow):
 
         self.resistance_value_label.setText(
             self.format_number(data["resistance_ohm"], suffix=" Ohm", precision=2)
+        )
+        self.resistance_2_value_label.setText(
+            self.format_number(resistance_2, suffix=" Ohm", precision=2)
         )
         total_actual = sum(
             data.get(f"mfc{index}_actual_mln_min", 0.0) for index in range(1, 7)
@@ -2544,7 +2785,9 @@ class MainWindow(QMainWindow):
         self.add_log_preview_row(data, event)
 
     def update_plot_ranges(self):
-        resistance_values = self.finite_values(self.resistance_data)
+        resistance_values = self.finite_values(
+            self.resistance_data + self.resistance_2_data
+        )
         flow_values = self.finite_values([
             value
             for values in self.mfc_flow_data.values()
@@ -2572,6 +2815,7 @@ class MainWindow(QMainWindow):
         self.plot_stack.setCurrentIndex(1 if showing_flow else 0)
         self.resistance_plot_button.setChecked(not showing_flow)
         self.flow_plot_button.setChecked(showing_flow)
+        self.resistance_legend.setVisible(not showing_flow)
         self.flow_legend.setVisible(showing_flow)
 
         for button, active in (
@@ -2658,6 +2902,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def format_number(value, suffix="", precision=2):
+        if value is None:
+            return "--"
+
         if isinstance(value, (int, float)) and math.isfinite(value):
             return f"{value:.{precision}f}{suffix}"
 
@@ -2677,6 +2924,7 @@ class MainWindow(QMainWindow):
             f"{data['elapsed_s']:.1f}",
             step_text,
             self.format_number(data["resistance_ohm"], precision=2),
+            self.format_number(data.get("resistance_2_ohm"), precision=2),
             f"{sum(data.get(f'mfc{index}_setpoint_mln_min', 0.0) for index in range(1, 7)):.2f}",
             f"{sum(data.get(f'mfc{index}_actual_mln_min', 0.0) for index in range(1, 7)):.2f}",
             data.get("event") or event or "--",

@@ -1,3 +1,4 @@
+import math
 import unittest
 
 from PySide6.QtCore import QCoreApplication
@@ -21,6 +22,23 @@ class ClosingLogger:
 class FailingShutdownMFC:
     def safe_shutdown(self):
         raise ConnectionError("write confirmation failed")
+
+
+class CapturingLogger(ClosingLogger):
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def write(self, record):
+        self.records.append(record)
+
+
+class FailingSecondMultimeter:
+    def read(self, _state):
+        raise ConnectionError("second instrument did not respond")
+
+    def close(self):
+        pass
 
 
 class AcquisitionManagerShutdownTests(unittest.TestCase):
@@ -100,6 +118,51 @@ class AcquisitionManagerShutdownTests(unittest.TestCase):
 
         self.assertIsNone(manager.logger)
         self.assertFalse(manager.acquisition_timer.isActive())
+
+    def test_second_simulated_multimeter_is_acquired_in_the_same_row(self):
+        manager = AcquisitionManager(
+            settings=DeviceSettings(multimeter_2_mode="simulation")
+        )
+        self.addCleanup(manager.close)
+        logger = CapturingLogger()
+        manager.logger = logger
+
+        manager.acquire_once()
+
+        self.assertEqual(len(logger.records), 1)
+        self.assertTrue(math.isfinite(logger.records[0].resistance_ohm))
+        self.assertTrue(math.isfinite(logger.records[0].resistance_2_ohm))
+        self.assertEqual(logger.records[0].multimeter_2_status, "SIMULATED OK")
+
+    def test_disabled_second_multimeter_leaves_second_resistance_empty(self):
+        manager = AcquisitionManager(settings=DeviceSettings())
+        self.addCleanup(manager.close)
+        logger = CapturingLogger()
+        manager.logger = logger
+
+        manager.acquire_once()
+
+        self.assertEqual(len(logger.records), 1)
+        self.assertIsNone(logger.records[0].resistance_2_ohm)
+        self.assertEqual(logger.records[0].multimeter_2_status, "Disabled")
+
+    def test_second_multimeter_failure_stops_the_experiment(self):
+        manager = AcquisitionManager(
+            settings=DeviceSettings(multimeter_2_mode="simulation")
+        )
+        self.addCleanup(manager.close)
+        logger = CapturingLogger()
+        manager.logger = logger
+        manager.multimeter_2 = FailingSecondMultimeter()
+        manager.acquisition_timer.start(1_000)
+
+        manager.acquire_once()
+
+        self.assertFalse(manager.acquisition_timer.isActive())
+        self.assertEqual(len(logger.records), 1)
+        self.assertTrue(math.isnan(logger.records[0].resistance_ohm))
+        self.assertTrue(math.isnan(logger.records[0].resistance_2_ohm))
+        self.assertEqual(logger.records[0].multimeter_2_status, "ERROR")
 
 
 if __name__ == "__main__":

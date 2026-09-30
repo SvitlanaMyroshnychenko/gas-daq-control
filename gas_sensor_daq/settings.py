@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 
+# Second multimeter added
 
 @dataclass(frozen=True)
 class MFCNodeConfig:
@@ -30,6 +31,9 @@ class DeviceSettings:
     mfc_baudrate: int = 38400
     mfc_nodes: tuple[MFCNodeConfig, ...] = EXPECTED_MFC_NODES
     multimeter_resource: str = ""
+    # Second multimeter added
+    multimeter_2_mode: str = "disabled"
+    multimeter_2_resource: str = ""
     # The user selects an output location in the UI before each experiment.
     data_directory: str = ""
 
@@ -41,6 +45,8 @@ def load_device_settings():
             "GAS_DAQ_MULTIMETER",
             os.getenv("GAS_DAQ_DEVICE_MODE", "simulation"),
         ),
+        # Second multimeter added
+        multimeter_2_mode=os.getenv("GAS_DAQ_MULTIMETER_2", "disabled").strip().lower(),
         mfc_mode=os.getenv(
             "GAS_DAQ_MFC",
             os.getenv("GAS_DAQ_DEVICE_MODE", "simulation"),
@@ -58,6 +64,11 @@ def load_device_settings():
             "GAS_DAQ_MULTIMETER_RESOURCE",
             os.getenv("GAS_DAQ_KEITHLEY_RESOURCE", ""),
         ),
+        # Second multimeter added
+        multimeter_2_resource=os.getenv(
+            "GAS_DAQ_MULTIMETER_2_RESOURCE",
+            "",
+        ).strip(),
         data_directory=os.getenv("GAS_DAQ_DATA_DIR", "").strip(),
     )
 

@@ -28,6 +28,7 @@ class AcquisitionManager(QObject):
     state_changed = Signal(object)
     device_error = Signal(str)
     multimeter_changed = Signal(str, str)
+    multimeter_2_changed = Signal(str, str)
     mfc_changed = Signal(str, str)
     recipe_step_changed = Signal(int)
     flow_warning = Signal(str)
@@ -46,6 +47,18 @@ class AcquisitionManager(QObject):
         self.multimeter_mode = settings.multimeter_mode
         self.mfc_mode = settings.mfc_mode
         self.multimeter_resource = settings.multimeter_resource
+
+        self.multimeter_2_mode = settings.multimeter_2_mode
+        self.multimeter_2_resource = settings.multimeter_2_resource
+        self.multimeter_2 = None
+
+        if self.multimeter_2_mode != "disabled":
+            self.multimeter_2 = create_multimeter(
+                settings,
+                mode=self.multimeter_2_mode,
+                resource_name=self.multimeter_2_resource,
+            )
+
         self.mfc_port = settings.mfc_port
         self.data_directory = settings.data_directory
         self.acquisition_interval_ms = settings.acquisition_interval_ms
@@ -122,6 +135,66 @@ class AcquisitionManager(QObject):
 
         return "Multimeter: simulated"
 
+    def set_multimeter_2_mode(self, mode, resource_name=""):
+        if self.acquisition_timer.isActive():
+            self.handle_device_error(
+                "Cannot switch second multimeter",
+                RuntimeError("Stop the experiment before changing device mode."),
+            )
+            return False
+
+        mode = str(mode).strip().lower()
+        resource_name = str(resource_name).strip()
+        if mode not in {"disabled", "simulation", "real"}:
+            self.handle_device_error(
+                "Second multimeter configuration failed",
+                ValueError(f"Unsupported mode: {mode}"),
+            )
+            return False
+
+        if (
+                mode == "real"
+                and self.multimeter_mode == "real"
+                and resource_name == self.multimeter_resource
+        ):
+            self.handle_device_error(
+                "Second multimeter configuration failed",
+                ValueError("Each multimeter must use a different VISA resource."),
+            )
+            return False
+
+        previous_multimeter = self.multimeter_2
+
+        try:
+            new_multimeter = (
+                None
+                if mode == "disabled"
+                else create_multimeter(
+                    self.settings,
+                    mode=mode,
+                    resource_name=resource_name,
+                )
+            )
+        except Exception as exc:
+            self.handle_device_error("Second multimeter connection failed", exc)
+            return False
+
+        self.multimeter_2 = new_multimeter
+        self.multimeter_2_mode = mode
+        self.multimeter_2_resource = resource_name
+        self._close_device(previous_multimeter, "Previous second multimeter close failed")
+        self.multimeter_2_changed.emit(mode, self.multimeter_2_status_text())
+        return True
+
+    def multimeter_2_status_text(self):
+        if self.multimeter_2_mode == "disabled":
+            return "Multimeter 2: disabled"
+
+        if self.multimeter_2_mode == "real":
+            return f"Multimeter 2: real ({self.multimeter_2_resource})"
+
+        return "Multimeter 2: simulated"
+
     def set_mfc_mode(self, mode, port=""):
         # If a real MFC connection fails, fall back to simulation. This keeps
         # the UI usable without leaving a half-connected hardware object alive.
@@ -188,6 +261,8 @@ class AcquisitionManager(QObject):
             # Every Start creates a fresh experiment file. Resume/append would
             # need explicit metadata handling and is intentionally not implicit.
             self.multimeter.reset_time()
+            if self.multimeter_2 is not None:
+                self.multimeter_2.reset_time()
             self.pending_events = []
             self.active_event = ""
             self.experiment_start_time = datetime.now()
@@ -414,12 +489,21 @@ class AcquisitionManager(QObject):
             ]
 
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "data_file_stem": base_filename,
             "format": save_format,
             "started_at": self.experiment_start_time.isoformat(timespec="seconds"),
             "sampling_rate_hz": rate_hz,
             "multimeter_mode": self.multimeter_mode,
+            "multimeter_resource": (
+                self.multimeter_resource if self.multimeter_mode == "real" else ""
+            ),
+            "multimeter_2_mode": self.multimeter_2_mode,
+            "multimeter_2_resource": (
+                self.multimeter_2_resource
+                if self.multimeter_2_mode == "real"
+                else ""
+            ),
             "mfc_mode": self.mfc_mode,
             "mfc_port": self.mfc_port if self.mfc_mode == "real" else "",
             "mfc_channels": channels,
@@ -524,6 +608,7 @@ class AcquisitionManager(QObject):
             self.logger = None
 
         self._close_device(self.multimeter, "Multimeter close failed")
+        self._close_device(self.multimeter_2, "Second multimeter close failed")
         self._close_device(self.mfc, "MFC close failed")
 
     def update_elapsed_time(self):
@@ -579,27 +664,44 @@ class AcquisitionManager(QObject):
 
         try:
             record = self.multimeter.read(state)
-            record.event = self.active_event
-            record.step_number = (
-                self.recipe_step_index + 1 if self.recipe_step_index >= 0 else None
-            )
-            channels = state.mfc_channels
-            record.total_setpoint_mln_min = sum(
-                channel.setpoint_sccm for channel in channels
-            )
-            record.total_actual_mln_min = sum(
-                channel.actual_sccm for channel in channels
-            )
-            self.check_actual_total_flow(record)
         except Exception as exc:
             message = self.format_device_error(
-                "Multimeter connection lost during measurement",
+                "First multimeter connection lost during measurement",
                 exc,
             )
             self.handle_device_error_message(message)
-            self.write_error_record(message, state)
-            self.stop_experiment("Stopped: multimeter connection lost")
+            self.write_error_record(message, state, failed_multimeter=1)
+            self.stop_experiment("Stopped: first multimeter connection lost")
             return
+
+        if self.multimeter_2 is not None:
+            try:
+                second_record = self.multimeter_2.read(state)
+            except Exception as exc:
+                message = self.format_device_error(
+                    "Second multimeter connection lost during measurement",
+                    exc,
+                )
+                self.handle_device_error_message(message)
+                self.write_error_record(message, state, failed_multimeter=2)
+                self.stop_experiment("Stopped: second multimeter connection lost")
+                return
+
+            record.resistance_2_ohm = second_record.resistance_ohm
+            record.multimeter_2_status = second_record.multimeter_status
+
+        record.event = self.active_event
+        record.step_number = (
+            self.recipe_step_index + 1 if self.recipe_step_index >= 0 else None
+        )
+        channels = state.mfc_channels
+        record.total_setpoint_mln_min = sum(
+            channel.setpoint_sccm for channel in channels
+        )
+        record.total_actual_mln_min = sum(
+            channel.actual_sccm for channel in channels
+        )
+        self.check_actual_total_flow(record)
 
         if self.logger is not None:
             try:
@@ -687,7 +789,7 @@ class AcquisitionManager(QObject):
             return f"{context}. Details: {detail}"
         return context
 
-    def write_error_record(self, message, state=None):
+    def write_error_record(self, message, state=None, failed_multimeter=None):
         # Write one final row when a device fails mid-run. NaN readings make the
         # failure visible in analysis without pretending a measurement happened.
         if self.logger is None:
@@ -707,8 +809,24 @@ class AcquisitionManager(QObject):
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
             elapsed_s=elapsed,
             resistance_ohm=math.nan,
+            resistance_2_ohm=(
+                math.nan if self.multimeter_2 is not None else None
+            ),
             event=message,
             multimeter_status="ERROR",
+            multimeter_2_status=(
+                "Disabled"
+                if self.multimeter_2 is None
+                else (
+                    "ERROR"
+                    if failed_multimeter == 2
+                    else (
+                        "Real"
+                        if self.multimeter_2_mode == "real"
+                        else "Simulated"
+                    )
+                )
+            ),
             mfc_channels=state.mfc_channels if state is not None else (),
             step_number=(self.recipe_step_index + 1 if self.recipe_step_index >= 0 else None),
             total_setpoint_mln_min=sum(

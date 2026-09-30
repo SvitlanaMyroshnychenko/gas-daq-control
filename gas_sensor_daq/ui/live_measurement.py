@@ -6,7 +6,14 @@ from gas_sensor_daq.ui.widgets.cards import graph_card
 class LiveMeasurementPanel:
     """Visual container for switching between resistance and MFC flow plots."""
 
-    def __init__(self, resistance_plot, flow_plot, channel_colors, set_active_plot):
+    def __init__(
+        self,
+        resistance_plot,
+        flow_plot,
+        resistance_colors,
+        channel_colors,
+        set_active_plot,
+    ):
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
@@ -23,6 +30,9 @@ class LiveMeasurementPanel:
         controls.addWidget(self.flow_button)
         controls.addStretch()
         layout.addLayout(controls)
+
+        self.resistance_legend = self._resistance_legend(resistance_colors)
+        layout.addWidget(self.resistance_legend)
 
         self.flow_legend = self._legend(channel_colors)
         self.flow_legend.hide()
@@ -81,6 +91,31 @@ class LiveMeasurementPanel:
                 f"background: {color}; border: none; border-radius: 4px;"
             )
             label = QLabel(f"MFC {index}")
+            label.setObjectName("flowLegendItem")
+            entry_layout.addWidget(marker)
+            entry_layout.addWidget(label)
+            layout.addWidget(entry)
+        layout.addStretch()
+        return legend
+
+    @staticmethod
+    def _resistance_legend(resistance_colors):
+        legend = QWidget()
+        legend.setObjectName("flowLegend")
+        layout = QHBoxLayout(legend)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+        for label_text, color in resistance_colors.items():
+            entry = QWidget()
+            entry_layout = QHBoxLayout(entry)
+            entry_layout.setContentsMargins(0, 0, 0, 0)
+            entry_layout.setSpacing(5)
+            marker = QFrame()
+            marker.setFixedSize(8, 8)
+            marker.setStyleSheet(
+                f"background: {color}; border: none; border-radius: 4px;"
+            )
+            label = QLabel(label_text)
             label.setObjectName("flowLegendItem")
             entry_layout.addWidget(marker)
             entry_layout.addWidget(label)

@@ -16,6 +16,13 @@ class DeviceStatusPanel:
         scan_multimeter,
         multimeter_status,
         multimeter_summary,
+        multimeter_2_mode,
+        multimeter_2_device,
+        multimeter_2_resource,
+        connect_multimeter_2,
+        scan_multimeter_2,
+        multimeter_2_status,
+        multimeter_2_summary,
         mfc_mode,
         mfc_port,
         connect_mfc,
@@ -37,6 +44,15 @@ class DeviceStatusPanel:
             ),
             (multimeter_resource, multimeter_status),
         )
+        multimeter_2_row, self.multimeter_2_status_dot = self._device_row(
+            "Multimeter 2",
+            multimeter_2_summary,
+            (
+                ("Mode", multimeter_2_mode, connect_multimeter_2),
+                ("Device", multimeter_2_device, scan_multimeter_2),
+            ),
+            (multimeter_2_resource, multimeter_2_status),
+        )
         mfc_row, self.mfc_status_dot = self._device_row(
             "MFC Rack (6 nodes)",
             mfc_summary,
@@ -51,6 +67,7 @@ class DeviceStatusPanel:
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(6)
         content.addWidget(multimeter_row)
+        content.addWidget(multimeter_2_row)
         content.addWidget(mfc_row)
 
         self.chevron = QPushButton()
